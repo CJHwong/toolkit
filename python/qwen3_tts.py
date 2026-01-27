@@ -25,7 +25,13 @@ USAGE:
     uv run $URL clone 'Hello from the other side' -r voice.wav -t 'original transcript'
 
     # Use a preset speaker
-    uv run $URL speak 'Good morning everyone!' -s Ethan
+    uv run $URL speak 'Good morning everyone!' -s Ryan
+
+    # Use a preset speaker with style instruction
+    uv run $URL speak 'I am so excited!' -s Aiden -i 'very happy and energetic'
+
+    # Use faster 0.6B model
+    uv run $URL speak --small 'Quick test' -s Vivian
 
     # Or run locally:
     uv run qwen3_tts.py <command> [options] "text to speak"
@@ -44,17 +50,25 @@ EXAMPLES:
     uv run qwen3_tts.py design -i "warm female voice" "Hello world"
     uv run qwen3_tts.py design -i "deep male voice, slow pace" "Welcome"
 
-    # Preset speakers (Chelsie, Ethan, Vivian, Serena, etc.)
+    # Preset speakers (Chinese: Vivian, Serena, Uncle_Fu, Dylan, Eric | English: Ryan, Aiden)
     uv run qwen3_tts.py speak "Hello world"
-    uv run qwen3_tts.py speak -s Ethan -l Chinese "你好"
+    uv run qwen3_tts.py speak -s Vivian -l Chinese "你好"
+    uv run qwen3_tts.py speak -i "speak angrily" -s Ryan "Stop doing that!"
+    uv run qwen3_tts.py speak -i "whisper" -s Serena "This is a secret"
+    uv run qwen3_tts.py speak --small "Quick test with 0.6B model"
 
 OPTIONS:
     -o, --output    Output filename (default: output.wav, auto-increments)
-    -l, --language  Language: English, Chinese, Japanese, Korean, etc.
+    -l, --language  Language: Auto, English, Chinese, Japanese, Korean, etc. (default: Auto)
     -v, --verbose   Show progress details
+    --small         Use faster 0.6B model (clone/speak only)
+
+SPEAKERS:
+    Chinese: Vivian, Serena, Uncle_Fu, Dylan, Eric
+    English: Ryan, Aiden
 
 NOTES:
-    - First run downloads models (~3GB for 1.7B model)
+    - First run downloads models (~3GB for 1.7B, ~1GB for 0.6B)
     - Reference audio is automatically converted to mono 24kHz
     - Supports piped input: echo "text" | uv run qwen3_tts.py design
 """
@@ -124,7 +138,7 @@ def cli():
 @cli.command("design")
 @click.argument("text", required=False)
 @click.option("-o", "--output", default="output.wav", help="Output filename")
-@click.option("-l", "--language", default="English", help="Language for TTS")
+@click.option("-l", "--language", default="Auto", help="Language (Auto, English, Chinese, etc.)")
 @click.option(
     "-i",
     "--instruct",
@@ -179,7 +193,7 @@ def design_command(
 @cli.command("clone")
 @click.argument("text", required=False)
 @click.option("-o", "--output", default="output.wav", help="Output filename")
-@click.option("-l", "--language", default="English", help="Language for TTS")
+@click.option("-l", "--language", default="Auto", help="Language (Auto, English, Chinese, etc.)")
 @click.option(
     "-r",
     "--ref-audio",
@@ -192,6 +206,7 @@ def design_command(
     required=True,
     help="Transcript of the reference audio",
 )
+@click.option("--small", is_flag=True, help="Use faster 0.6B model instead of 1.7B")
 @click.option("-v", "--verbose", is_flag=True, help="Enable verbose output")
 def clone_command(
     text: str | None,
@@ -199,6 +214,7 @@ def clone_command(
     language: str,
     ref_audio: str,
     ref_text: str,
+    small: bool,
     verbose: bool,
 ):
     """Clone a voice from reference audio and generate new speech.
@@ -208,6 +224,7 @@ def clone_command(
     \b
         qwen3_tts.py clone -r voice.wav -t "Hello there" "New text to speak"
         qwen3_tts.py clone -r ref.wav -t "$(cat transcript.txt)" "Clone this"
+        qwen3_tts.py clone --small -r voice.wav -t "Hi" "Faster with 0.6B model"
     """
     import mlx.core as mx
     from mlx_audio.tts.utils import load_model
@@ -220,10 +237,11 @@ def clone_command(
     if not ref_path.exists():
         raise click.UsageError(f"Reference audio file not found: {ref_audio}")
 
+    model_name = "Qwen/Qwen3-TTS-12Hz-0.6B-Base" if small else "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
     if verbose:
-        click.echo("Loading Base model for voice cloning...")
+        click.echo(f"Loading {'0.6B' if small else '1.7B'} Base model for voice cloning...")
 
-    model = load_model("Qwen/Qwen3-TTS-12Hz-1.7B-Base")
+    model = load_model(model_name)
 
     if verbose:
         click.echo(f"Reference audio: {ref_audio}")
@@ -270,40 +288,55 @@ def clone_command(
 @cli.command("speak")
 @click.argument("text", required=False)
 @click.option("-o", "--output", default="output.wav", help="Output filename")
-@click.option("-l", "--language", default="English", help="Language for TTS")
+@click.option("-l", "--language", default="Auto", help="Language (Auto, English, Chinese, etc.)")
 @click.option(
     "-s",
     "--speaker",
-    default="Chelsie",
-    help="Speaker name (Chelsie, Ethan, etc.)",
+    default="Ryan",
+    help="Speaker: Chinese (Vivian, Serena, Uncle_Fu, Dylan, Eric) | English (Ryan, Aiden)",
 )
+@click.option(
+    "-i",
+    "--instruct",
+    default="",
+    help="Style instruction (e.g., 'speak angrily', 'very happy', 'slow and soft')",
+)
+@click.option("--small", is_flag=True, help="Use faster 0.6B model instead of 1.7B")
 @click.option("-v", "--verbose", is_flag=True, help="Enable verbose output")
 def speak_command(
-    text: str | None, output: str, language: str, speaker: str, verbose: bool
+    text: str | None, output: str, language: str, speaker: str, instruct: str, small: bool, verbose: bool
 ):
-    """Generate speech using a preset custom voice.
+    """Generate speech using a preset custom voice with optional style control.
 
-    Available speakers: Chelsie, Ethan, Vivian, Serena, Nova, Sky, Aura, Echo, Stella
+    Available speakers:
+        Chinese: Vivian, Serena, Uncle_Fu, Dylan, Eric
+        English: Ryan, Aiden
 
     Examples:
 
     \b
         qwen3_tts.py speak "Hello world"
-        qwen3_tts.py speak -s Ethan "Good morning everyone"
+        qwen3_tts.py speak -s Aiden "Good morning everyone"
         qwen3_tts.py speak -s Vivian -l Chinese "你好"
+        qwen3_tts.py speak -i "speak angrily" "I told you not to do that!"
+        qwen3_tts.py speak -i "whisper softly" -s Serena "This is a secret"
+        qwen3_tts.py speak --small "Quick test with 0.6B model"
     """
     from mlx_audio.tts.utils import load_model
 
     text = get_text_from_input(text)
     output_path = resolve_output_path(output)
 
+    model_name = "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice" if small else "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
     if verbose:
-        click.echo("Loading CustomVoice model...")
+        click.echo(f"Loading {'0.6B' if small else '1.7B'} CustomVoice model...")
 
-    model = load_model("Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice")
+    model = load_model(model_name)
 
     if verbose:
         click.echo(f"Speaker: {speaker}")
+        if instruct:
+            click.echo(f"Style instruction: {instruct}")
         click.echo(f"Generating audio for: {text[:50]}{'...' if len(text) > 50 else ''}")
 
     results = list(
@@ -311,6 +344,7 @@ def speak_command(
             text=text,
             language=language,
             speaker=speaker,
+            instruct=instruct,
             verbose=verbose,
         )
     )
