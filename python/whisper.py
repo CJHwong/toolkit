@@ -28,7 +28,7 @@ USAGE:
     uv run $URL https://example.com/audio.mp3
 
     # SRT subtitles output
-    uv run $URL -f srt -o subtitles video.mp4
+    uv run $URL -f srt -o subtitles.srt video.mp4
 
     # With chunking at silences (for long audio)
     uv run $URL -c long_audio.mp3
@@ -40,7 +40,7 @@ USAGE:
     uv run whisper.py [OPTIONS] INPUT [INPUT...]
 
 OPTIONS:
-    -o, --output PATH       Output directory (default: input filename or 'whisper_output')
+    -o, --output PATH       Output file path (default: <input>.txt or whisper_output.txt)
     -l, --language TEXT     Language code (default: en)
     -m, --model TEXT        Model name/path (default: auto by language)
     -f, --format            Output format: txt, srt, json, lrc (default: txt)
@@ -392,7 +392,7 @@ def format_output(segments: list[dict], fmt: str) -> str:
 
 @click.command()
 @click.argument("inputs", nargs=-1, required=True)
-@click.option("-o", "--output", default=None, help="Output directory")
+@click.option("-o", "--output", default=None, help="Output file path")
 @click.option("-l", "--language", default="en", help="Language code (default: en)")
 @click.option("-m", "--model", default=None, help="Model name or path (default: auto by language)")
 @click.option(
@@ -429,7 +429,7 @@ def cli(
     Examples:
         whisper.py audio.mp3
         whisper.py -l zh chinese_audio.mp3
-        whisper.py -f srt -o subtitles video.mp4
+        whisper.py -f srt -o subtitles.srt video.mp4
         whisper.py part1.mp3 part2.mp3 part3.mp3
         whisper.py https://example.com/audio.mp3
     """
@@ -440,17 +440,21 @@ def cli(
     # Resolve model path
     model_path = resolve_model_path(model, language, verbose)
 
-    # Determine output directory
+    # Determine output file path
     if output is None:
         if len(inputs) == 1 and not inputs[0].startswith(("http://", "https://")):
-            # Use input filename without extension
-            output = Path(inputs[0]).stem
+            # Sibling file next to input: audio.mp3 → audio.txt
+            output_file = Path(inputs[0]).with_suffix(f".{output_format}")
         else:
-            output = "whisper_output"
-        log(f"Using output directory: {output}", verbose)
+            output_file = Path(f"whisper_output.{output_format}")
+        log(f"Output file: {output_file}", verbose)
+    else:
+        output_file = Path(output)
+        # Auto-add extension if output has no suffix
+        if not output_file.suffix:
+            output_file = output_file.with_suffix(f".{output_format}")
 
-    output_dir = Path(output)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    output_file.parent.mkdir(parents=True, exist_ok=True)
 
     # Create temp directory for processing
     with tempfile.TemporaryDirectory() as temp_dir_str:
@@ -493,7 +497,6 @@ def cli(
 
         # Format and save output
         formatted = format_output(all_segments, output_format)
-        output_file = output_dir / f"transcription.{output_format}"
         output_file.write_text(formatted, encoding="utf-8")
 
         log(f"Transcription saved to: {output_file}", verbose)
