@@ -2,6 +2,7 @@
 # requires-python = ">=3.10"
 # dependencies = [
 #     "click>=8.0",
+#     "ollama>=0.6",
 # ]
 # ///
 """
@@ -12,13 +13,16 @@ Reads session logs and cached facets from ~/.claude/ to produce a self-contained
 HTML report with charts, statistics, and placeholder sections for LLM-generated
 insights.
 
+Stage 3 (facet extraction) uses a local Ollama instance to extract structured
+facets from uncached sessions.  Stage 5 (insight generation) uses Ollama to
+generate narrative insights from aggregated statistics.
+
 USAGE:
     uv run python/cc_insights.py
+    uv run python/cc_insights.py -v --max-extract 0      # cache + placeholders only
+    uv run python/cc_insights.py -v --max-extract 5       # extract 5 uncached facets
+    uv run python/cc_insights.py --model qwen3:30b        # use a different model
     uv run python/cc_insights.py -o ~/Desktop/insights.html
-    uv run python/cc_insights.py -v
-
-LLM-dependent stages (facet extraction and insight generation) are stubbed with
-TODO placeholders and mock data. All metadata extraction and aggregation is real.
 """
 
 from __future__ import annotations
@@ -142,6 +146,144 @@ DISPLAY_NAMES: dict[str, str] = {
     "very_helpful": "Very Helpful",
     "essential": "Essential",
 }
+
+FACET_PROMPT = """\
+Analyze this Claude Code session and extract structured facets.
+
+RESPOND WITH ONLY A VALID JSON OBJECT with these fields:
+- underlying_goal (string)
+- goal_categories (object: category → count)
+- outcome: fully_achieved|mostly_achieved|partially_achieved|not_achieved|unclear_from_transcript
+- user_satisfaction_counts (object: level → count)
+- claude_helpfulness: unhelpful|slightly_helpful|moderately_helpful|very_helpful|essential
+- session_type: single_task|multi_task|iterative_refinement|exploration|quick_question
+- friction_counts (object: type → count)
+- friction_detail (string)
+- primary_success: fast_accurate_search|correct_code_edits|good_explanations|proactive_help|multi_file_changes|handled_complexity|good_debugging|none
+- brief_summary (string, 1-2 sentences)
+
+CRITICAL GUIDELINES:
+1. goal_categories: Count ONLY what the USER explicitly asked for.
+2. user_satisfaction_counts: Base ONLY on explicit user signals.
+3. friction_counts: Be specific about what went wrong.
+4. If very short or just warmup, use warmup_minimal for goal_category.
+
+SESSION:
+"""
+
+# -- Stage 5 insight prompts ------------------------------------------------
+
+INSIGHT_PROMPT_PROJECT_AREAS = """\
+You are analyzing aggregated Claude Code usage statistics.
+Identify the main project areas or domains this user works on, based on their
+session summaries, goal categories, and tool usage.
+
+RESPOND WITH ONLY A VALID JSON OBJECT matching this schema:
+{"areas": [{"name": "<area name>", "session_count": <int>, "description": "<1-2 sentences>"}]}
+
+Return 3-6 areas. session_count should be your best estimate of how many sessions
+relate to each area. Areas should be meaningful groupings (e.g., "Backend API Development",
+"Data Pipeline Work"), not generic labels.
+
+USAGE DATA:
+"""
+
+INSIGHT_PROMPT_INTERACTION_STYLE = """\
+You are analyzing aggregated Claude Code usage statistics.
+Describe this user's interaction style — how they work with Claude Code.
+Consider session types, message patterns, tool usage, response times, and outcomes.
+
+RESPOND WITH ONLY A VALID JSON OBJECT matching this schema:
+{"narrative": "<2-3 paragraph markdown narrative>", "key_pattern": "<one sentence summary of their dominant pattern>"}
+
+Be specific and data-driven. Reference actual numbers. Use **bold** for emphasis.
+
+USAGE DATA:
+"""
+
+INSIGHT_PROMPT_WHAT_WORKS = """\
+You are analyzing aggregated Claude Code usage statistics.
+Identify what works well for this user — their most effective workflows,
+impressive patterns, and strengths in how they use Claude Code.
+
+RESPOND WITH ONLY A VALID JSON OBJECT matching this schema:
+{"intro": "<1-2 sentence overview>", "impressive_workflows": [{"title": "<short title>", "description": "<2-3 sentences>"}]}
+
+Return 3-5 impressive workflows. Be specific about what makes them effective.
+Reference actual tool usage, success rates, and patterns from the data.
+
+USAGE DATA:
+"""
+
+INSIGHT_PROMPT_FRICTION = """\
+You are analyzing aggregated Claude Code usage statistics.
+Analyze friction points — what causes problems, errors, or frustration.
+Consider tool errors, friction counts, user rejections, and failed outcomes.
+
+RESPOND WITH ONLY A VALID JSON OBJECT matching this schema:
+{"intro": "<1-2 sentence overview of friction landscape>", "categories": [{"category": "<category name>", "description": "<what goes wrong>", "examples": ["<specific example 1>", "<specific example 2>"]}]}
+
+Return 2-4 friction categories. Be honest and specific. Reference actual error
+counts and friction types from the data. Suggest root causes where possible.
+
+USAGE DATA:
+"""
+
+INSIGHT_PROMPT_SUGGESTIONS = """\
+You are analyzing aggregated Claude Code usage statistics.
+Generate actionable suggestions to improve this user's Claude Code experience.
+Consider their friction points, unused features, and workflow patterns.
+
+RESPOND WITH ONLY A VALID JSON OBJECT matching this schema:
+{"claude_md_additions": [{"addition": "<what to add>", "why": "<reason>", "prompt_scaffold": "<example text for CLAUDE.md>"}], "features_to_try": [{"feature": "<feature name>", "one_liner": "<brief description>", "why_for_you": "<personalized reason>", "example_code": "<example usage>"}], "usage_patterns": [{"title": "<pattern name>", "suggestion": "<what to do>", "detail": "<how it helps>", "copyable_prompt": "<example prompt to try>"}]}
+
+Return 2-3 items per category. Make suggestions specific to this user's data,
+not generic advice. Reference their actual usage patterns and gaps.
+
+USAGE DATA:
+"""
+
+INSIGHT_PROMPT_HORIZON = """\
+You are analyzing aggregated Claude Code usage statistics.
+Suggest forward-looking opportunities — new workflows, techniques, or
+capabilities this user hasn't fully explored yet.
+
+RESPOND WITH ONLY A VALID JSON OBJECT matching this schema:
+{"intro": "<1-2 sentence overview>", "opportunities": [{"title": "<opportunity>", "whats_possible": "<what they could achieve>", "how_to_try": "<concrete steps>", "copyable_prompt": "<example prompt to start>"}]}
+
+Return 3-4 opportunities. Make them ambitious but realistic based on the user's
+current skill level and usage patterns. Reference actual data.
+
+USAGE DATA:
+"""
+
+INSIGHT_PROMPT_FUN_ENDING = """\
+You are analyzing aggregated Claude Code usage statistics.
+Create a fun, memorable closing statement for this user's insights report.
+Highlight an interesting or surprising stat, a notable achievement, or a
+quirky pattern from their usage.
+
+RESPOND WITH ONLY A VALID JSON OBJECT matching this schema:
+{"headline": "<catchy one-liner>", "detail": "<2-3 sentences expanding on the headline with real stats>"}
+
+Be warm, genuine, and specific. Reference actual numbers from the data.
+Avoid generic platitudes — find something genuinely interesting or remarkable.
+
+USAGE DATA:
+"""
+
+INSIGHT_PROMPT_AT_A_GLANCE = """\
+You are analyzing aggregated Claude Code usage statistics and insight results
+from other analysis sections. Synthesize everything into a brief executive summary.
+
+RESPOND WITH ONLY A VALID JSON OBJECT matching this schema:
+{"whats_working": "<2-3 sentences on strengths>", "whats_hindering": "<2-3 sentences on friction>", "quick_wins": "<2-3 sentences on easy improvements>", "ambitious_workflows": "<2-3 sentences on bigger opportunities>"}
+
+Be concise, specific, and data-driven. Use **bold** for key metrics.
+This is the first thing the user sees — make it count.
+
+USAGE DATA:
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -789,58 +931,202 @@ def extract_session_metadata(
 # ---------------------------------------------------------------------------
 
 
+def _build_transcript(
+    chain: list[dict],
+    metadata: SessionMetadata,
+) -> str:
+    """Build a text transcript from a session chain for LLM facet extraction.
+
+    Matches the original ``BN8`` function.  Truncates to 30,000 chars.
+    """
+    lines: list[str] = [
+        f"Session: {metadata.session_id[:8]}",
+        f"Date: {metadata.start_time}",
+        f"Project: {metadata.project_path}",
+        f"Duration: {metadata.duration_minutes} min",
+        "",
+    ]
+    for entry in chain:
+        msg_type = entry.get("type")
+        msg_body = entry.get("message") or {}
+        content = msg_body.get("content", "")
+
+        if msg_type == "user":
+            text = _extract_text(content)
+            if text.strip():
+                lines.append(f"[User]: {text[:500]}")
+
+        elif msg_type == "assistant":
+            if isinstance(content, str):
+                lines.append(f"[Assistant]: {content[:300]}")
+            elif isinstance(content, list):
+                for block in content:
+                    if not isinstance(block, dict):
+                        continue
+                    if block.get("type") == "text":
+                        lines.append(f"[Assistant]: {block.get('text', '')[:300]}")
+                    elif block.get("type") == "tool_use":
+                        lines.append(f"[Tool: {block.get('name', '?')}]")
+
+    transcript = "\n".join(lines)
+    return transcript[:30_000]
+
+
+def _check_ollama(model: str) -> tuple[bool, str]:
+    """Pre-flight check that Ollama is reachable and the model is available."""
+    try:
+        import ollama
+
+        models = ollama.list()
+        names = {m.model for m in models.models}
+        if model not in names:
+            return False, f"Model '{model}' not found. Available: {', '.join(sorted(names))}"
+        return True, ""
+    except ImportError:
+        return False, "ollama package not installed (pip install ollama)"
+    except Exception as e:
+        return False, f"Ollama not reachable: {e}"
+
+
+def _extract_facet_llm(transcript: str, model: str) -> dict | None:
+    """Send a transcript to Ollama and parse the JSON facet response."""
+    try:
+        import ollama
+
+        resp = ollama.generate(
+            model=model,
+            prompt=FACET_PROMPT + transcript,
+            format="json",
+        )
+        data = json.loads(resp.response)
+        if "underlying_goal" in data:
+            return data
+        return None
+    except Exception:
+        return None
+
+
+def _facet_from_data(sid: str, data: dict) -> SessionFacet:
+    """Create a SessionFacet from a raw dict (cache file or LLM response)."""
+    return SessionFacet(
+        session_id=sid,
+        underlying_goal=data.get("underlying_goal", ""),
+        goal_categories=data.get("goal_categories", {}),
+        outcome=data.get("outcome", "unclear_from_transcript"),
+        user_satisfaction_counts=data.get("user_satisfaction_counts", {}),
+        claude_helpfulness=data.get("claude_helpfulness", "moderately_helpful"),
+        session_type=data.get("session_type", "single_task"),
+        friction_counts=data.get("friction_counts", {}),
+        friction_detail=data.get("friction_detail", ""),
+        primary_success=data.get("primary_success", "none"),
+        brief_summary=data.get("brief_summary", ""),
+    )
+
+
+def _placeholder_facet(sid: str) -> SessionFacet:
+    """Neutral placeholder for sessions without cached or LLM-extracted facets."""
+    return SessionFacet(
+        session_id=sid,
+        underlying_goal="(uncached — LLM extraction not available)",
+        goal_categories={"implement_feature": 1},
+        outcome="unclear_from_transcript",
+        user_satisfaction_counts={"likely_satisfied": 1},
+        claude_helpfulness="moderately_helpful",
+        session_type="single_task",
+        friction_counts={},
+        friction_detail="",
+        primary_success="none",
+        brief_summary=f"Session {sid[:8]}... (no facet data)",
+    )
+
+
 def extract_facets(
     metadata_map: dict[str, SessionMetadata],
+    sessions: dict[str, tuple[list[dict], datetime, datetime]],
+    *,
+    model: str = "gpt-oss:20b-cloud",
+    max_extract: int = 50,
     verbose: bool = False,
 ) -> dict[str, SessionFacet]:
-    """Read cached facets; uncached sessions get a mock placeholder."""
+    """Read cached facets; extract uncached via Ollama LLM; placeholder the rest."""
     facets: dict[str, SessionFacet] = {}
     cache_hits = 0
-    cache_misses = 0
+    uncached_sids: list[str] = []
 
+    # 1. Load all cached facets
     for sid in metadata_map:
         cache_path = FACETS_DIR / f"{sid}.json"
         if cache_path.exists():
             try:
                 data = json.loads(cache_path.read_text(encoding="utf-8"))
-                facets[sid] = SessionFacet(
-                    session_id=sid,
-                    underlying_goal=data.get("underlying_goal", ""),
-                    goal_categories=data.get("goal_categories", {}),
-                    outcome=data.get("outcome", "unclear_from_transcript"),
-                    user_satisfaction_counts=data.get("user_satisfaction_counts", {}),
-                    claude_helpfulness=data.get(
-                        "claude_helpfulness", "moderately_helpful"
-                    ),
-                    session_type=data.get("session_type", "single_task"),
-                    friction_counts=data.get("friction_counts", {}),
-                    friction_detail=data.get("friction_detail", ""),
-                    primary_success=data.get("primary_success", "none"),
-                    brief_summary=data.get("brief_summary", ""),
-                )
+                facets[sid] = _facet_from_data(sid, data)
                 cache_hits += 1
             except (json.JSONDecodeError, OSError):
-                cache_misses += 1
+                uncached_sids.append(sid)
         else:
-            cache_misses += 1
-            # TODO: LLM facet extraction would go here.
-            # For uncached sessions, return a neutral placeholder.
-            facets[sid] = SessionFacet(
-                session_id=sid,
-                underlying_goal="(uncached — LLM extraction not implemented)",
-                goal_categories={"implement_feature": 1},
-                outcome="unclear_from_transcript",
-                user_satisfaction_counts={"likely_satisfied": 1},
-                claude_helpfulness="moderately_helpful",
-                session_type="single_task",
-                friction_counts={},
-                friction_detail="",
-                primary_success="none",
-                brief_summary=f"Session {sid[:8]}... (no cached facet)",
-            )
+            uncached_sids.append(sid)
 
     if verbose:
-        click.echo(f"  Facet cache hits: {cache_hits}, misses: {cache_misses}")
+        click.echo(f"  Facet cache hits: {cache_hits}, uncached: {len(uncached_sids)}")
+
+    # 2. LLM extraction for uncached sessions
+    if uncached_sids and max_extract > 0:
+        ok, reason = _check_ollama(model)
+        if not ok:
+            click.echo(f"  Ollama unavailable: {reason}")
+            click.echo("  Falling back to placeholders for uncached sessions")
+            for sid in uncached_sids:
+                facets[sid] = _placeholder_facet(sid)
+        else:
+            to_extract = uncached_sids[:max_extract]
+            remaining = uncached_sids[max_extract:]
+            n = len(to_extract)
+            extracted = 0
+            failed = 0
+
+            click.echo(f"  Extracting facets via {model} ({n} sessions)...")
+            FACETS_DIR.mkdir(parents=True, exist_ok=True)
+
+            for i, sid in enumerate(to_extract, 1):
+                session_data = sessions.get(sid)
+                if not session_data:
+                    facets[sid] = _placeholder_facet(sid)
+                    failed += 1
+                    continue
+
+                chain, _created, _modified = session_data
+                meta = metadata_map[sid]
+                transcript = _build_transcript(chain, meta)
+                data = _extract_facet_llm(transcript, model)
+
+                if data:
+                    facets[sid] = _facet_from_data(sid, data)
+                    # Write to cache for future runs
+                    cache_path = FACETS_DIR / f"{sid}.json"
+                    try:
+                        cache_path.write_text(
+                            json.dumps(data, indent=2), encoding="utf-8"
+                        )
+                    except OSError:
+                        pass
+                    extracted += 1
+                    if verbose:
+                        click.echo(f"    [{i}/{n}] {sid[:8]}... ok")
+                else:
+                    facets[sid] = _placeholder_facet(sid)
+                    failed += 1
+                    if verbose:
+                        click.echo(f"    [{i}/{n}] {sid[:8]}... failed")
+
+            click.echo(f"  Extracted: {extracted}, failed: {failed}")
+
+            # Placeholder for sessions beyond max_extract
+            for sid in remaining:
+                facets[sid] = _placeholder_facet(sid)
+    else:
+        # max_extract == 0 or no uncached sessions
+        for sid in uncached_sids:
+            facets[sid] = _placeholder_facet(sid)
 
     # Post-filter: exclude sessions whose sole goal_category is warmup_minimal
     excluded = set()
@@ -1059,27 +1345,129 @@ def _detect_multi_clauding(
 
 
 # ---------------------------------------------------------------------------
-# Stage 5: Generate Insights (TODO — LLM placeholder)
+# Stage 5: Generate Insights
 # ---------------------------------------------------------------------------
 
 
-def generate_insights(
-    stats: AggregatedStats,
-    verbose: bool = False,
-) -> InsightResults:
-    """
-    TODO: This stage would send 8 parallel LLM requests using a capable model
-    (e.g., Claude Sonnet/Opus) with maxOutputTokens=8192.
+def _build_stats_context(stats: AggregatedStats) -> str:
+    """Build a concise text summary of AggregatedStats for LLM prompts."""
+    lines: list[str] = []
 
-    For now, returns mock data matching the expected response schemas so the
-    HTML builder can render without crashing.
-    """
-    # TODO: Build JSON payload from stats (top 8 tools, top 8 goals, etc.)
-    # TODO: Send 7 parallel prompts (project_areas, interaction_style, etc.)
-    # TODO: Send at_a_glance after the other 7 complete (it uses their results)
-    # TODO: Model tier: capable (e.g., claude-sonnet-4-5-20250929)
-    # TODO: Concurrency: 7 parallel, then 1 sequential
+    # Overview
+    lines.append(f"Sessions: {stats.total_sessions} ({stats.sessions_with_facets} with facets)")
+    lines.append(f"Messages: {stats.total_messages}")
+    lines.append(f"Duration: {stats.total_duration_hours:.1f} hours")
+    lines.append(f"Date range: {stats.date_range_start} to {stats.date_range_end}")
+    lines.append(f"Days active: {stats.days_active}, Msgs/day: {stats.messages_per_day:.1f}")
 
+    # Top tools
+    top_tools = sorted(stats.tool_counts.items(), key=lambda x: -x[1])[:8]
+    if top_tools:
+        lines.append("Top tools: " + ", ".join(f"{k} ({v})" for k, v in top_tools))
+
+    # Top goal categories
+    top_goals = sorted(stats.goal_categories.items(), key=lambda x: -x[1])[:8]
+    if top_goals:
+        lines.append("Top goals: " + ", ".join(
+            f"{DISPLAY_NAMES.get(k, k)} ({v})" for k, v in top_goals
+        ))
+
+    # Distributions
+    if stats.outcomes:
+        lines.append("Outcomes: " + ", ".join(
+            f"{DISPLAY_NAMES.get(k, k)}: {v}" for k, v in stats.outcomes.items()
+        ))
+    if stats.satisfaction:
+        lines.append("Satisfaction: " + ", ".join(
+            f"{DISPLAY_NAMES.get(k, k)}: {v}" for k, v in stats.satisfaction.items()
+        ))
+    if stats.helpfulness:
+        lines.append("Helpfulness: " + ", ".join(
+            f"{DISPLAY_NAMES.get(k, k)}: {v}" for k, v in stats.helpfulness.items()
+        ))
+    if stats.session_types:
+        lines.append("Session types: " + ", ".join(
+            f"{DISPLAY_NAMES.get(k, k)}: {v}" for k, v in stats.session_types.items()
+        ))
+
+    # Friction & success
+    top_friction = sorted(stats.friction.items(), key=lambda x: -x[1])[:6]
+    if top_friction:
+        lines.append("Top friction: " + ", ".join(
+            f"{DISPLAY_NAMES.get(k, k)} ({v})" for k, v in top_friction
+        ))
+    top_success = sorted(stats.success.items(), key=lambda x: -x[1])[:6]
+    if top_success:
+        lines.append("Top success: " + ", ".join(
+            f"{DISPLAY_NAMES.get(k, k)} ({v})" for k, v in top_success
+        ))
+
+    # Git & code
+    lines.append(f"Git: {stats.git_commits} commits, {stats.git_pushes} pushes")
+    lines.append(
+        f"Code: +{stats.total_lines_added} -{stats.total_lines_removed} lines, "
+        f"{stats.total_files_modified} files modified"
+    )
+    lines.append(f"Tool errors: {stats.total_tool_errors}")
+    if stats.tool_error_categories:
+        lines.append("Error categories: " + ", ".join(
+            f"{k} ({v})" for k, v in sorted(
+                stats.tool_error_categories.items(), key=lambda x: -x[1]
+            )[:5]
+        ))
+
+    # Feature usage
+    features = []
+    if stats.sessions_using_task_agent:
+        features.append(f"Task agent: {stats.sessions_using_task_agent} sessions")
+    if stats.sessions_using_mcp:
+        features.append(f"MCP: {stats.sessions_using_mcp} sessions")
+    if stats.sessions_using_web_search:
+        features.append(f"Web search: {stats.sessions_using_web_search} sessions")
+    if stats.sessions_using_web_fetch:
+        features.append(f"Web fetch: {stats.sessions_using_web_fetch} sessions")
+    if features:
+        lines.append("Features: " + ", ".join(features))
+
+    # Multi-clauding
+    mc = stats.multi_clauding
+    if mc["overlap_events"] > 0:
+        lines.append(
+            f"Multi-clauding: {mc['overlap_events']} overlap events, "
+            f"{mc['sessions_involved']} sessions, "
+            f"{mc['user_messages_during']} msgs during overlaps"
+        )
+
+    # Top session summaries
+    top_summaries = stats.session_summaries[:5]
+    if top_summaries:
+        lines.append("Top session summaries:")
+        for s in top_summaries:
+            summary = s.get("brief_summary", "")
+            outcome = s.get("outcome", "")
+            if summary:
+                lines.append(f"  - {summary} (outcome: {outcome})")
+
+    return "\n".join(lines)
+
+
+def _generate_insight_section(prompt: str, context: str, model: str) -> dict | None:
+    """Send an insight prompt to Ollama and parse the JSON response."""
+    try:
+        import ollama
+
+        resp = ollama.generate(
+            model=model,
+            prompt=prompt + context,
+            format="json",
+        )
+        return json.loads(resp.response)
+    except Exception:
+        return None
+
+
+def _mock_insights(stats: AggregatedStats) -> InsightResults:
+    """Return placeholder insights (fallback when LLM unavailable)."""
     return InsightResults(
         at_a_glance={
             "whats_working": (
@@ -1107,7 +1495,7 @@ def generate_insights(
                     "session_count": stats.total_sessions,
                     "description": (
                         "Project area detection requires LLM analysis of session "
-                        "summaries. Run the real /insights command for this section."
+                        "summaries. Run with Ollama available for this section."
                     ),
                 },
             ],
@@ -1155,7 +1543,6 @@ def generate_insights(
                     "description": "Friction categorization requires LLM analysis.",
                     "examples": [
                         "Example friction points would be extracted from session data.",
-                        "The real /insights command provides specific examples.",
                     ],
                 },
             ],
@@ -1205,6 +1592,69 @@ def generate_insights(
                 "A memorable moment analysis requires LLM processing."
             ),
         },
+    )
+
+
+def generate_insights(
+    stats: AggregatedStats,
+    *,
+    model: str = "gpt-oss:20b-cloud",
+    verbose: bool = False,
+) -> InsightResults:
+    """Generate insights via Ollama LLM; falls back to mock data if unavailable."""
+    mock = _mock_insights(stats)
+    context = _build_stats_context(stats)
+
+    ok, reason = _check_ollama(model)
+    if not ok:
+        click.echo(f"  Ollama unavailable: {reason}")
+        click.echo("  Falling back to placeholder insights")
+        return mock
+
+    sections = [
+        ("project_areas", INSIGHT_PROMPT_PROJECT_AREAS),
+        ("interaction_style", INSIGHT_PROMPT_INTERACTION_STYLE),
+        ("what_works", INSIGHT_PROMPT_WHAT_WORKS),
+        ("friction_analysis", INSIGHT_PROMPT_FRICTION),
+        ("suggestions", INSIGHT_PROMPT_SUGGESTIONS),
+        ("on_the_horizon", INSIGHT_PROMPT_HORIZON),
+        ("fun_ending", INSIGHT_PROMPT_FUN_ENDING),
+    ]
+
+    results: dict[str, dict] = {}
+    for i, (name, prompt) in enumerate(sections, 1):
+        data = _generate_insight_section(prompt, context, model)
+        if data is not None:
+            results[name] = data
+            click.echo(f"  [{i}/8] {name}... ok")
+        else:
+            results[name] = getattr(mock, name)
+            click.echo(f"  [{i}/8] {name}... failed (using fallback)")
+
+    # at_a_glance uses the other 7 results as additional context
+    other_summary = json.dumps(
+        {k: v for k, v in results.items()},
+        indent=None,
+        default=str,
+    )
+    aag_context = context + "\n\nPRIOR ANALYSIS RESULTS:\n" + other_summary
+    aag_data = _generate_insight_section(INSIGHT_PROMPT_AT_A_GLANCE, aag_context, model)
+    if aag_data is not None:
+        results["at_a_glance"] = aag_data
+        click.echo("  [8/8] at_a_glance... ok")
+    else:
+        results["at_a_glance"] = mock.at_a_glance
+        click.echo("  [8/8] at_a_glance... failed (using fallback)")
+
+    return InsightResults(
+        at_a_glance=results["at_a_glance"],
+        project_areas=results["project_areas"],
+        interaction_style=results["interaction_style"],
+        what_works=results["what_works"],
+        friction_analysis=results["friction_analysis"],
+        suggestions=results["suggestions"],
+        on_the_horizon=results["on_the_horizon"],
+        fun_ending=results["fun_ending"],
     )
 
 
@@ -2033,7 +2483,19 @@ def build_html_report(
     help=f"Output path (default: {DEFAULT_OUTPUT})",
 )
 @click.option("-v", "--verbose", is_flag=True, help="Verbose output")
-def main(output: Path | None, verbose: bool):
+@click.option(
+    "--model",
+    default="gpt-oss:20b-cloud",
+    show_default=True,
+    help="Ollama model for facet extraction and insight generation",
+)
+@click.option(
+    "--max-extract",
+    default=50,
+    type=int,
+    help="Max facets to extract via LLM per run (0=skip)",
+)
+def main(output: Path | None, verbose: bool, model: str, max_extract: int):
     """Generate a Claude Code usage insights HTML report."""
     output_path = output or DEFAULT_OUTPUT
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2063,7 +2525,13 @@ def main(output: Path | None, verbose: bool):
 
     # Stage 3: Extract Facets
     click.echo("Stage 3: Loading facets...")
-    facets = extract_facets(metadata_map, verbose)
+    facets = extract_facets(
+        metadata_map,
+        sessions,
+        model=model,
+        max_extract=max_extract,
+        verbose=verbose,
+    )
     click.echo(f"  {len(facets)} sessions with facets")
 
     # Stage 4: Aggregate Statistics
@@ -2076,9 +2544,9 @@ def main(output: Path | None, verbose: bool):
         click.echo(f"  Days active: {stats.days_active}")
         click.echo(f"  Multi-clauding events: {stats.multi_clauding['overlap_events']}")
 
-    # Stage 5: Generate Insights (TODO — mock)
-    click.echo("Stage 5: Generating insights (placeholder)...")
-    insights = generate_insights(stats, verbose)
+    # Stage 5: Generate Insights
+    click.echo(f"Stage 5: Generating insights via Ollama ({model})...")
+    insights = generate_insights(stats, model=model, verbose=verbose)
 
     # Stage 6: Build HTML Report
     click.echo("Stage 6: Building HTML report...")
