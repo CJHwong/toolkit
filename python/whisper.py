@@ -6,6 +6,8 @@
 #     "pydub>=0.25.0",
 #     "httpx>=0.25.0",
 #     "huggingface_hub>=0.20.0",
+#     "sounddevice>=0.5.0",
+#     "numpy>=1.24.0",
 # ]
 # ///
 """
@@ -20,6 +22,12 @@ USAGE:
 
     # Chinese audio (auto-selects breeze model)
     uv run $URL -l zh audio.mp3
+
+    # Live microphone transcription
+    uv run $URL --live
+
+    # Live transcription in Chinese with custom chunk duration
+    uv run $URL --live -l zh --chunk-duration 8
 
     # Multiple files (concatenated)
     uv run $URL part1.mp3 part2.mp3
@@ -50,6 +58,9 @@ OPTIONS:
     -v, --verbose           Verbose output
     --prompt TEXT           Initial transcription prompt
     --max-length INT        Max segment length in characters
+    --live                  Live microphone transcription (Ctrl+C to stop)
+    --chunk-duration FLOAT  Seconds per chunk in live mode (default: 10)
+    --overlap FLOAT         Overlap seconds between chunks in live mode (default: 1)
 
 MODELS:
     Standard models (auto-download via pywhispercpp):
@@ -326,6 +337,113 @@ def transcribe(
     return result
 
 
+def live_transcribe(
+    model_path: str,
+    language: str,
+    prompt: str | None = None,
+    max_length: int = 0,
+    chunk_duration: float = 10.0,
+    overlap: float = 1.0,
+    silence_threshold: float = 0.01,
+    verbose: bool = False,
+) -> list[str]:
+    """Live microphone transcription using chunked inference.
+
+    Captures audio from the default input device, accumulates chunks, and
+    transcribes each chunk with overlap for context continuity. Segments
+    that fall within the overlap region are suppressed to avoid duplicates.
+    """
+    import queue
+
+    import numpy as np
+    import sounddevice as sd
+
+    sample_rate = 16000
+    chunk_samples = int(sample_rate * chunk_duration)
+    overlap_samples = int(sample_rate * overlap)
+
+    log(f"Loading model: {model_path}", verbose)
+    model = Model(model_path, print_progress=False, print_realtime=False)
+
+    transcribe_kwargs: dict = {"language": language}
+    if prompt:
+        transcribe_kwargs["initial_prompt"] = prompt
+    if max_length > 0:
+        transcribe_kwargs["max_len"] = max_length
+        transcribe_kwargs["split_on_word"] = True
+
+    audio_q: queue.Queue[np.ndarray] = queue.Queue()
+    all_text: list[str] = []
+    is_first_chunk = True
+
+    def audio_callback(indata, frames, time_info, status):
+        if status and verbose:
+            log(f"Audio: {status}", True, "WARN")
+        audio_q.put(indata.copy())
+
+    click.echo("Listening... (Ctrl+C to stop)", err=True)
+
+    try:
+        with sd.InputStream(
+            samplerate=sample_rate,
+            channels=1,
+            dtype="float32",
+            callback=audio_callback,
+        ):
+            buffer = np.array([], dtype=np.float32)
+
+            while True:
+                # Block until audio arrives
+                try:
+                    data = audio_q.get(timeout=0.1)
+                    buffer = np.concatenate([buffer, data.flatten()])
+                except queue.Empty:
+                    continue
+
+                # Drain any remaining queued data
+                while not audio_q.empty():
+                    try:
+                        data = audio_q.get_nowait()
+                        buffer = np.concatenate([buffer, data.flatten()])
+                    except queue.Empty:
+                        break
+
+                if len(buffer) < chunk_samples:
+                    continue
+
+                # Skip silent chunks to avoid hallucination
+                rms = np.sqrt(np.mean(buffer**2))
+                if rms < silence_threshold:
+                    log(f"Skipping silent chunk (RMS={rms:.4f})", verbose)
+                    buffer = buffer[-overlap_samples:] if overlap_samples > 0 else np.array([], dtype=np.float32)
+                    continue
+
+                segments = model.transcribe(buffer, **transcribe_kwargs)
+
+                # Suppress segments in the overlap zone to avoid duplicates
+                min_start = 0.0 if is_first_chunk else overlap
+                for seg in segments:
+                    if seg.t0 / 100.0 >= min_start:
+                        text = seg.text.strip()
+                        if text:
+                            click.echo(text)
+                            all_text.append(text)
+
+                is_first_chunk = False
+
+                # Keep tail as overlap for next chunk's context
+                if overlap_samples > 0:
+                    buffer = buffer[-overlap_samples:]
+                else:
+                    buffer = np.array([], dtype=np.float32)
+
+    except KeyboardInterrupt:
+        pass
+
+    click.echo("\nStopped.", err=True)
+    return all_text
+
+
 def format_txt(segments: list[dict]) -> str:
     """Format segments as plain text."""
     return "\n".join(seg["text"] for seg in segments if seg["text"])
@@ -391,7 +509,7 @@ def format_output(segments: list[dict], fmt: str) -> str:
 
 
 @click.command()
-@click.argument("inputs", nargs=-1, required=True)
+@click.argument("inputs", nargs=-1, required=False)
 @click.option("-o", "--output", default=None, help="Output file path")
 @click.option("-l", "--language", default="en", help="Language code (default: en)")
 @click.option("-m", "--model", default=None, help="Model name or path (default: auto by language)")
@@ -408,6 +526,9 @@ def format_output(segments: list[dict], fmt: str) -> str:
 @click.option("-v", "--verbose", is_flag=True, help="Verbose output")
 @click.option("--prompt", default=None, help="Initial transcription prompt")
 @click.option("--max-length", default=0, type=int, help="Max segment length in characters")
+@click.option("--live", is_flag=True, help="Live microphone transcription")
+@click.option("--chunk-duration", default=10.0, type=float, help="Seconds per chunk in live mode (default: 10)")
+@click.option("--overlap", default=1.0, type=float, help="Overlap seconds between chunks in live mode (default: 1)")
 @click.version_option(version="0.1.0")
 def cli(
     inputs: tuple[str, ...],
@@ -420,6 +541,9 @@ def cli(
     verbose: bool,
     prompt: str | None,
     max_length: int,
+    live: bool,
+    chunk_duration: float,
+    overlap: float,
 ):
     """Transcribe audio files using Whisper.
 
@@ -433,6 +557,30 @@ def cli(
         whisper.py part1.mp3 part2.mp3 part3.mp3
         whisper.py https://example.com/audio.mp3
     """
+    # Live microphone mode
+    if live:
+        model_path = resolve_model_path(model, language, verbose)
+        all_text = live_transcribe(
+            model_path=model_path,
+            language=language,
+            prompt=prompt,
+            max_length=max_length,
+            chunk_duration=chunk_duration,
+            overlap=overlap,
+            verbose=verbose,
+        )
+        if output and all_text:
+            output_file = Path(output)
+            if not output_file.suffix:
+                output_file = output_file.with_suffix(".txt")
+            output_file.parent.mkdir(parents=True, exist_ok=True)
+            output_file.write_text("\n".join(all_text), encoding="utf-8")
+            click.echo(str(output_file))
+        return
+
+    if not inputs:
+        raise click.UsageError("At least one input file is required (or use --live)")
+
     # Auto-detect realtime mode based on TTY
     if realtime is None:
         realtime = sys.stdout.isatty()
