@@ -276,6 +276,14 @@ def _format_timestamp(seconds: float) -> str:
     return f"{hours:02d}:{minutes:02d}:{secs:02d}.{millis:03d}"
 
 
+def _format_wall_time(seconds: float) -> str:
+    """Format seconds as HH:MM:SS for wall-clock display."""
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    secs = int(seconds % 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
 def _make_realtime_callback():
     """Create a callback that prints segments as they're transcribed."""
     def callback(segment):
@@ -345,15 +353,21 @@ def live_transcribe(
     chunk_duration: float = 10.0,
     overlap: float = 1.0,
     silence_threshold: float = 0.01,
+    pause_duration: float = 1.5,
     verbose: bool = False,
-) -> list[str]:
+) -> list[dict]:
     """Live microphone transcription using chunked inference.
 
-    Captures audio from the default input device, accumulates chunks, and
-    transcribes each chunk with overlap for context continuity. Segments
-    that fall within the overlap region are suppressed to avoid duplicates.
+    Captures audio from the default input device and transcribes at natural
+    speech pauses (VAD) or when chunk_duration is reached (safety cap).
+    Overlap between chunks provides context continuity, and segments in the
+    overlap zone are suppressed to avoid duplicates. The previous chunk's
+    output is fed as initial_prompt for the next chunk (prompt chaining).
+
+    Returns list of dicts with 'text', 'wall_start', 'wall_end' keys.
     """
     import queue
+    import time
 
     import numpy as np
     import sounddevice as sd
@@ -361,6 +375,8 @@ def live_transcribe(
     sample_rate = 16000
     chunk_samples = int(sample_rate * chunk_duration)
     overlap_samples = int(sample_rate * overlap)
+    pause_samples = int(sample_rate * pause_duration)
+    min_speech_samples = int(sample_rate * 2.0)
 
     log(f"Loading model: {model_path}", verbose)
     model = Model(model_path, print_progress=False, print_realtime=False)
@@ -373,7 +389,7 @@ def live_transcribe(
         transcribe_kwargs["split_on_word"] = True
 
     audio_q: queue.Queue[np.ndarray] = queue.Queue()
-    all_text: list[str] = []
+    all_segments: list[dict] = []
     is_first_chunk = True
 
     def audio_callback(indata, frames, time_info, status):
@@ -382,6 +398,8 @@ def live_transcribe(
         audio_q.put(indata.copy())
 
     click.echo("Listening... (Ctrl+C to stop)", err=True)
+
+    session_start = time.monotonic()
 
     try:
         with sd.InputStream(
@@ -408,28 +426,56 @@ def live_transcribe(
                     except queue.Empty:
                         break
 
-                if len(buffer) < chunk_samples:
+                # Determine whether to trigger transcription
+                trigger = False
+
+                if len(buffer) >= chunk_samples:
+                    trigger = True
+                elif len(buffer) >= min_speech_samples + pause_samples:
+                    # VAD: detect speech followed by a pause
+                    tail_rms = np.sqrt(np.mean(buffer[-pause_samples:] ** 2))
+                    body_rms = np.sqrt(np.mean(buffer[:-pause_samples] ** 2))
+                    if tail_rms < silence_threshold and body_rms >= silence_threshold:
+                        trigger = True
+                        log(f"Pause detected at {len(buffer) / sample_rate:.1f}s", verbose)
+
+                if not trigger:
                     continue
 
-                # Skip silent chunks to avoid hallucination
+                # Skip entirely silent chunks
                 rms = np.sqrt(np.mean(buffer**2))
                 if rms < silence_threshold:
                     log(f"Skipping silent chunk (RMS={rms:.4f})", verbose)
                     buffer = buffer[-overlap_samples:] if overlap_samples > 0 else np.array([], dtype=np.float32)
                     continue
 
+                # Wall-clock offset for this buffer
+                now = time.monotonic() - session_start
+                buffer_wall_start = now - len(buffer) / sample_rate
+
                 segments = model.transcribe(buffer, **transcribe_kwargs)
 
                 # Suppress segments in the overlap zone to avoid duplicates
                 min_start = 0.0 if is_first_chunk else overlap
+                last_text = None
                 for seg in segments:
                     if seg.t0 / 100.0 >= min_start:
                         text = seg.text.strip()
                         if text:
                             click.echo(text)
-                            all_text.append(text)
+                            all_segments.append({
+                                "text": text,
+                                "wall_start": buffer_wall_start + seg.t0 / 100.0,
+                                "wall_end": buffer_wall_start + seg.t1 / 100.0,
+                            })
+                            last_text = text
 
                 is_first_chunk = False
+
+                # Prompt chaining: feed last output as context for next chunk
+                if last_text:
+                    prefix = f"{prompt} " if prompt else ""
+                    transcribe_kwargs["initial_prompt"] = f"{prefix}{last_text}"
 
                 # Keep tail as overlap for next chunk's context
                 if overlap_samples > 0:
@@ -441,7 +487,7 @@ def live_transcribe(
         pass
 
     click.echo("\nStopped.", err=True)
-    return all_text
+    return all_segments
 
 
 def format_txt(segments: list[dict]) -> str:
@@ -560,7 +606,7 @@ def cli(
     # Live microphone mode
     if live:
         model_path = resolve_model_path(model, language, verbose)
-        all_text = live_transcribe(
+        segments = live_transcribe(
             model_path=model_path,
             language=language,
             prompt=prompt,
@@ -569,12 +615,16 @@ def cli(
             overlap=overlap,
             verbose=verbose,
         )
-        if output and all_text:
+        if output and segments:
             output_file = Path(output)
             if not output_file.suffix:
                 output_file = output_file.with_suffix(".txt")
             output_file.parent.mkdir(parents=True, exist_ok=True)
-            output_file.write_text("\n".join(all_text), encoding="utf-8")
+            lines = [
+                f"[{_format_wall_time(seg['wall_start'])}] {seg['text']}"
+                for seg in segments
+            ]
+            output_file.write_text("\n".join(lines), encoding="utf-8")
             click.echo(str(output_file))
         return
 
