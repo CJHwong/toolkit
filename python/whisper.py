@@ -29,6 +29,9 @@ USAGE:
     # Live transcription in Chinese with custom chunk duration
     uv run $URL --live -l zh --chunk-duration 8
 
+    # Live with output folder (saves transcript.txt + audio.wav)
+    uv run $URL --live -o meeting_2024_01_15
+
     # Multiple files (concatenated)
     uv run $URL part1.mp3 part2.mp3
 
@@ -354,8 +357,9 @@ def live_transcribe(
     overlap: float = 1.0,
     silence_threshold: float = 0.01,
     pause_duration: float = 1.5,
+    record_audio: bool = False,
     verbose: bool = False,
-) -> list[dict]:
+) -> tuple:
     """Live microphone transcription using chunked inference.
 
     Captures audio from the default input device and transcribes at natural
@@ -364,9 +368,16 @@ def live_transcribe(
     overlap zone are suppressed to avoid duplicates. The previous chunk's
     output is fed as initial_prompt for the next chunk (prompt chaining).
 
-    Returns list of dicts with 'text', 'wall_start', 'wall_end' keys.
+    First Ctrl+C triggers graceful shutdown (finishes current transcription
+    and flushes remaining audio). Second Ctrl+C force-quits.
+
+    Returns (segments, raw_audio) where segments is list[dict] with
+    'text', 'wall_start', 'wall_end' keys, and raw_audio is a float32
+    numpy array (16kHz mono) or None when record_audio is False.
     """
     import queue
+    import signal
+    import threading
     import time
 
     import numpy as np
@@ -390,41 +401,96 @@ def live_transcribe(
 
     audio_q: queue.Queue[np.ndarray] = queue.Queue()
     all_segments: list[dict] = []
+    raw_chunks: list[np.ndarray] | None = [] if record_audio else None
     is_first_chunk = True
 
-    def audio_callback(indata, frames, time_info, status):
-        if status and verbose:
-            log(f"Audio: {status}", True, "WARN")
-        audio_q.put(indata.copy())
+    # --- Graceful shutdown via signal (must be called from main thread) ---
+    shutdown = threading.Event()
+    original_handler = signal.getsignal(signal.SIGINT)
 
+    def on_sigint(sig, frame):
+        if shutdown.is_set():
+            # Second Ctrl+C: restore default and force quit
+            signal.signal(signal.SIGINT, original_handler)
+            raise KeyboardInterrupt
+        click.echo("\nFinishing up... (Ctrl+C again to force quit)", err=True)
+        shutdown.set()
+
+    # --- Helpers that capture enclosing state ---
+    def drain_queue():
+        """Non-blocking drain of audio queue. Returns concatenated array or None."""
+        chunks = []
+        while not audio_q.empty():
+            try:
+                chunks.append(audio_q.get_nowait().flatten())
+            except queue.Empty:
+                break
+        return np.concatenate(chunks) if chunks else None
+
+    def accumulate(data):
+        """Append data to raw recording buffer if recording."""
+        if raw_chunks is not None:
+            raw_chunks.append(data)
+
+    def do_transcribe(audio_buffer):
+        """Transcribe a buffer and collect segments with wall-clock timestamps."""
+        nonlocal is_first_chunk
+
+        now = time.monotonic() - session_start
+        buffer_wall_start = now - len(audio_buffer) / sample_rate
+
+        segments = model.transcribe(audio_buffer, **transcribe_kwargs)
+
+        min_start = 0.0 if is_first_chunk else overlap
+        last_text = None
+        for seg in segments:
+            if seg.t0 / 100.0 >= min_start:
+                text = seg.text.strip()
+                if text:
+                    click.echo(text)
+                    all_segments.append({
+                        "text": text,
+                        "wall_start": buffer_wall_start + seg.t0 / 100.0,
+                        "wall_end": buffer_wall_start + seg.t1 / 100.0,
+                    })
+                    last_text = text
+
+        is_first_chunk = False
+
+        # Prompt chaining
+        if last_text:
+            prefix = f"{prompt} " if prompt else ""
+            transcribe_kwargs["initial_prompt"] = f"{prefix}{last_text}"
+
+    # --- Main loop ---
     click.echo("Listening... (Ctrl+C to stop)", err=True)
-
     session_start = time.monotonic()
+    signal.signal(signal.SIGINT, on_sigint)
 
     try:
         with sd.InputStream(
             samplerate=sample_rate,
             channels=1,
             dtype="float32",
-            callback=audio_callback,
+            callback=lambda indata, frames, time_info, status: audio_q.put(indata.copy()),
         ):
             buffer = np.array([], dtype=np.float32)
 
-            while True:
+            while not shutdown.is_set():
                 # Block until audio arrives
                 try:
                     data = audio_q.get(timeout=0.1)
-                    buffer = np.concatenate([buffer, data.flatten()])
+                    data = data.flatten()
+                    buffer = np.concatenate([buffer, data])
+                    accumulate(data)
                 except queue.Empty:
                     continue
 
                 # Drain any remaining queued data
-                while not audio_q.empty():
-                    try:
-                        data = audio_q.get_nowait()
-                        buffer = np.concatenate([buffer, data.flatten()])
-                    except queue.Empty:
-                        break
+                extra = drain_queue()
+                if extra is not None:
+                    buffer = np.concatenate([buffer, extra])
+                    accumulate(extra)
 
                 # Determine whether to trigger transcription
                 trigger = False
@@ -449,33 +515,7 @@ def live_transcribe(
                     buffer = buffer[-overlap_samples:] if overlap_samples > 0 else np.array([], dtype=np.float32)
                     continue
 
-                # Wall-clock offset for this buffer
-                now = time.monotonic() - session_start
-                buffer_wall_start = now - len(buffer) / sample_rate
-
-                segments = model.transcribe(buffer, **transcribe_kwargs)
-
-                # Suppress segments in the overlap zone to avoid duplicates
-                min_start = 0.0 if is_first_chunk else overlap
-                last_text = None
-                for seg in segments:
-                    if seg.t0 / 100.0 >= min_start:
-                        text = seg.text.strip()
-                        if text:
-                            click.echo(text)
-                            all_segments.append({
-                                "text": text,
-                                "wall_start": buffer_wall_start + seg.t0 / 100.0,
-                                "wall_end": buffer_wall_start + seg.t1 / 100.0,
-                            })
-                            last_text = text
-
-                is_first_chunk = False
-
-                # Prompt chaining: feed last output as context for next chunk
-                if last_text:
-                    prefix = f"{prompt} " if prompt else ""
-                    transcribe_kwargs["initial_prompt"] = f"{prefix}{last_text}"
+                do_transcribe(buffer)
 
                 # Keep tail as overlap for next chunk's context
                 if overlap_samples > 0:
@@ -483,11 +523,27 @@ def live_transcribe(
                 else:
                     buffer = np.array([], dtype=np.float32)
 
+            # --- Graceful shutdown: drain queue and flush remaining buffer ---
+            extra = drain_queue()
+            if extra is not None:
+                buffer = np.concatenate([buffer, extra])
+                accumulate(extra)
+
+            if len(buffer) >= min_speech_samples:
+                rms = np.sqrt(np.mean(buffer**2))
+                if rms >= silence_threshold:
+                    log("Transcribing remaining audio...", verbose)
+                    do_transcribe(buffer)
+
     except KeyboardInterrupt:
         pass
+    finally:
+        signal.signal(signal.SIGINT, original_handler)
 
     click.echo("\nStopped.", err=True)
-    return all_segments
+
+    raw_audio = np.concatenate(raw_chunks) if raw_chunks else None
+    return all_segments, raw_audio
 
 
 def format_txt(segments: list[dict]) -> str:
@@ -606,26 +662,43 @@ def cli(
     # Live microphone mode
     if live:
         model_path = resolve_model_path(model, language, verbose)
-        segments = live_transcribe(
+        segments, raw_audio = live_transcribe(
             model_path=model_path,
             language=language,
             prompt=prompt,
             max_length=max_length,
             chunk_duration=chunk_duration,
             overlap=overlap,
+            record_audio=bool(output),
             verbose=verbose,
         )
-        if output and segments:
-            output_file = Path(output)
-            if not output_file.suffix:
-                output_file = output_file.with_suffix(".txt")
-            output_file.parent.mkdir(parents=True, exist_ok=True)
+        if output:
+            import wave
+
+            output_dir = Path(output)
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+            # Save transcript
             lines = [
                 f"[{_format_wall_time(seg['wall_start'])}] {seg['text']}"
                 for seg in segments
             ]
-            output_file.write_text("\n".join(lines), encoding="utf-8")
-            click.echo(str(output_file))
+            transcript_path = output_dir / "transcript.txt"
+            transcript_path.write_text("\n".join(lines), encoding="utf-8")
+            log(f"Transcript: {transcript_path}", verbose=True)
+
+            # Save audio recording
+            if raw_audio is not None and len(raw_audio) > 0:
+                audio_int16 = (raw_audio * 32767).clip(-32768, 32767).astype("int16")
+                wav_path = output_dir / "audio.wav"
+                with wave.open(str(wav_path), "wb") as wf:
+                    wf.setnchannels(1)
+                    wf.setsampwidth(2)
+                    wf.setframerate(16000)
+                    wf.writeframes(audio_int16.tobytes())
+                log(f"Audio: {wav_path}", verbose=True)
+
+            click.echo(str(output_dir))
         return
 
     if not inputs:
