@@ -131,13 +131,13 @@ def resolve_model_path(model_arg: str | None, language: str, verbose: bool = Fal
     """
     # Determine effective model name
     if model_arg is None:
-        lang_lower = language.lower()
+        lang_lower = (language or "").lower()
         if lang_lower.startswith("zh"):
             model_arg = DEFAULT_MODEL_ZH
             log(f"Auto-selected model '{model_arg}' for language '{language}'", verbose)
         else:
             model_arg = DEFAULT_MODEL_OTHER
-            log(f"Auto-selected model '{model_arg}' for language '{language}'", verbose)
+            log(f"Auto-selected model '{model_arg}' for language '{language or 'auto'}'", verbose)
 
     # Absolute path: use directly
     if Path(model_arg).is_absolute():
@@ -320,9 +320,9 @@ def transcribe(
     model = Model(model_path, **model_params)
 
     # Set transcription parameters
-    transcribe_params = {
-        "language": language,
-    }
+    transcribe_params = {}
+    if language:
+        transcribe_params["language"] = language
 
     if prompt:
         transcribe_params["initial_prompt"] = prompt
@@ -392,7 +392,7 @@ def live_transcribe(
     log(f"Loading model: {model_path}", verbose)
     model = Model(model_path, print_progress=False, print_realtime=False)
 
-    transcribe_kwargs: dict = {"language": language}
+    transcribe_kwargs: dict = {"language": language} if language else {}
     if prompt:
         transcribe_kwargs["initial_prompt"] = prompt
     if max_length > 0:
@@ -613,7 +613,7 @@ def format_output(segments: list[dict], fmt: str) -> str:
 @click.command()
 @click.argument("inputs", nargs=-1, required=False)
 @click.option("-o", "--output", default=None, help="Output file path")
-@click.option("-l", "--language", default="en", help="Language code (default: en)")
+@click.option("-l", "--language", default=None, help="Language code (default: auto-detect)")
 @click.option("-m", "--model", default=None, help="Model name or path (default: auto by language)")
 @click.option(
     "-f",
