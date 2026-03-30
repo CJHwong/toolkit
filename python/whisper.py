@@ -1,13 +1,13 @@
 # /// script
 # requires-python = ">=3.10"
 # dependencies = [
-#     "pywhispercpp>=1.4.0",
-#     "click>=8.0",
-#     "pydub>=0.25.0",
-#     "httpx>=0.25.0",
-#     "huggingface_hub>=0.20.0",
-#     "sounddevice>=0.5.0",
-#     "numpy>=1.24.0",
+#     "pywhispercpp==1.4.1",
+#     "click==8.3.1",
+#     "pydub==0.25.1",
+#     "httpx==0.28.1",
+#     "huggingface-hub==1.8.0",
+#     "sounddevice==0.5.5",
+#     "numpy==2.4.4",
 # ]
 # ///
 """

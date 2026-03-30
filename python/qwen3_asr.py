@@ -1,10 +1,10 @@
 # /// script
 # requires-python = ">=3.10"
 # dependencies = [
-#     "mlx-audio>=0.3.1",
-#     "click>=8.0",
-#     "pydub>=0.25.0",
-#     "httpx>=0.25.0",
+#     "mlx-audio==0.4.1",
+#     "click==8.3.1",
+#     "pydub==0.25.1",
+#     "httpx==0.28.1",
 # ]
 # ///
 """

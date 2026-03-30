@@ -1,8 +1,8 @@
 # /// script
 # requires-python = ">=3.10"
 # dependencies = [
-#     "click>=8.0",
-#     "ollama>=0.6",
+#     "click==8.3.1",
+#     "ollama==0.6.1",
 # ]
 # ///
 """

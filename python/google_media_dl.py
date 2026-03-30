@@ -1,10 +1,10 @@
 # /// script
 # requires-python = ">=3.10"
 # dependencies = [
-#     "playwright>=1.50.0",
-#     "click>=8.0",
-#     "httpx>=0.25.0",
-#     "yt-dlp>=2024.0",
+#     "playwright==1.58.0",
+#     "click==8.3.1",
+#     "httpx==0.28.1",
+#     "yt-dlp==2026.3.17",
 # ]
 # ///
 """

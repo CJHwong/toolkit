@@ -1,12 +1,12 @@
 # /// script
 # requires-python = ">=3.12"
 # dependencies = [
-#     "transformers>=5.0.0rc1",
-#     "mlx-audio @ git+https://github.com/Blaizzy/mlx-audio.git",
-#     "click",
-#     "numpy",
-#     "soundfile",
-#     "librosa",
+#     "transformers==5.4.0",
+#     "mlx-audio @ git+https://github.com/Blaizzy/mlx-audio.git@6408d2a410eb8c57464e07725b92271860199250",
+#     "click==8.3.1",
+#     "numpy==2.4.4",
+#     "soundfile==0.13.1",
+#     "librosa==0.11.0",
 # ]
 # ///
 """
