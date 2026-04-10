@@ -15,33 +15,30 @@ Downloads videos from any URL using yt-dlp. For view-only Google Drive files
 
 USAGE:
     # Run directly from GitHub (no clone needed):
-    URL=https://raw.githubusercontent.com/CJHwong/toolkit/main/python/google_media_dl.py
+    S=https://raw.githubusercontent.com/CJHwong/toolkit/main/python/google_media_dl.py
 
     # YouTube / YouTube Music (uses yt-dlp)
-    uv run $URL 'https://www.youtube.com/watch?v=VIDEO_ID'
-    uv run $URL -a 'https://music.youtube.com/watch?v=VIDEO_ID'
+    uv run $S -b chrome 'https://www.youtube.com/watch?v=VIDEO_ID'
+    uv run $S -b chrome -a 'https://music.youtube.com/watch?v=VIDEO_ID'
 
     # Google Drive (yt-dlp first, Playwright fallback for view-only)
-    uv run $URL 'https://drive.google.com/file/d/FILE_ID/view'
+    uv run $S -b chrome 'https://drive.google.com/file/d/FILE_ID/view'
 
     # Audio only
-    uv run $URL -a 'https://drive.google.com/file/d/FILE_ID/view'
+    uv run $S -b chrome -a 'https://drive.google.com/file/d/FILE_ID/view'
 
     # With explicit output filename
-    uv run $URL 'https://drive.google.com/file/d/FILE_ID/view' output.mp4
+    uv run $S -b chrome 'https://drive.google.com/file/d/FILE_ID/view' output.mp4
 
     # Visible browser for Playwright fallback debugging
-    uv run $URL --no-headless -v 'https://drive.google.com/file/d/FILE_ID/view'
-
-    # Use Firefox cookies instead of Zen
-    uv run $URL -b firefox 'https://www.youtube.com/watch?v=VIDEO_ID'
+    uv run $S -b chrome --no-headless -v 'https://drive.google.com/file/d/FILE_ID/view'
 
     # Or run locally:
-    uv run google_media_dl.py [OPTIONS] URL [OUTPUT]
+    uv run google_media_dl.py -b BROWSER [OPTIONS] URL [OUTPUT]
 
 OPTIONS:
+    -b, --browser TEXT          Browser to read cookies from (chrome, firefox, etc.)
     -a, --audio-only            Download audio only (m4a)
-    -b, --browser TEXT          Browser to extract cookies from (default: zen)
     --headless/--no-headless    Run browser headless (default: headless, Playwright only)
     -t, --timeout INT           Timeout in seconds for stream capture (default: 30, Playwright only)
     -v, --verbose               Verbose output
@@ -113,17 +110,19 @@ def try_ytdlp(
     url: str,
     output: str | None,
     audio_only: bool,
-    browser: str,
+    browser: str | None,
     verbose: bool,
 ) -> tuple[bool, str]:
     """Try downloading with yt-dlp. Returns (success, stderr_output)."""
-    if browser == "zen":
-        profile_path = resolve_zen_profile()
-        cookie_arg = f"firefox:{profile_path}"
-    else:
-        cookie_arg = browser
+    cmd = ["yt-dlp"]
 
-    cmd = ["yt-dlp", "--cookies-from-browser", cookie_arg]
+    if browser:
+        if browser == "zen":
+            profile_path = resolve_zen_profile()
+            cookie_arg = f"firefox:{profile_path}"
+        else:
+            cookie_arg = browser
+        cmd += ["--cookies-from-browser", cookie_arg]
 
     if audio_only:
         cmd += ["-x", "--audio-format", "m4a", "--audio-quality", "0"]
@@ -506,6 +505,13 @@ def download_stream(
                 chunk_headers = {**headers, "Range": f"bytes={start}-{end}"}
                 resp = client.get(clean_url, headers=chunk_headers)
 
+                if resp.status_code in (401, 403):
+                    raise click.ClickException(
+                        f"HTTP {resp.status_code} - access denied while downloading stream.\n"
+                        "  Your browser cookies may have expired or lack access to this file.\n"
+                        "  Try a different browser with:  -b chrome\n"
+                        "  Accepted browsers: firefox, chrome, chromium, brave, edge, opera, vivaldi"
+                    )
                 if resp.status_code not in (200, 206):
                     resp.raise_for_status()
 
@@ -551,21 +557,37 @@ def sanitize_filename(name: str) -> str:
 @click.argument("output", required=False, default=None)
 @click.option(
     "-a", "--audio-only", is_flag=True,
-    help="Download audio only (m4a)",
+    help="Extract audio only as .m4a (works for both YouTube and Google Drive).",
 )
 @click.option(
-    "-b", "--browser", default="zen",
-    help="Browser to extract cookies from (default: zen)",
+    "-b", "--browser", default=None,
+    help=(
+        "Which browser to read login cookies from. "
+        "Uses your existing browser session so you don't need to log in again. "
+        "Accepted values: chrome, firefox, chromium, brave, edge, opera, vivaldi, zen. "
+        "Required for private/authenticated videos. "
+        "If you get a 401/403 auth error, try specifying a browser you're logged into Google with."
+    ),
 )
 @click.option(
     "--headless/--no-headless", default=True,
-    help="Run browser headless (default: headless)",
+    help=(
+        "Whether the Playwright fallback browser runs invisibly (headless) or "
+        "visibly (--no-headless). Only affects Google Drive fallback. "
+        "Use --no-headless with -v to debug playback issues."
+    ),
 )
 @click.option(
     "-t", "--timeout", default=30, type=int,
-    help="Timeout in seconds for stream capture (default: 30)",
+    help=(
+        "How long (seconds) to wait for video streams during Playwright capture. "
+        "Increase if you have a slow connection. Only affects Google Drive fallback."
+    ),
 )
-@click.option("-v", "--verbose", is_flag=True, help="Verbose output")
+@click.option(
+    "-v", "--verbose", is_flag=True,
+    help="Show detailed progress, captured streams, and debug info.",
+)
 @click.version_option(version="0.1.0")
 def cli(
     url: str,
@@ -576,24 +598,77 @@ def cli(
     timeout: int,
     verbose: bool,
 ):
-    """Download videos via yt-dlp, with Playwright fallback for view-only Google Drive.
+    """Download videos from YouTube, Google Drive, and other sites.
 
-    URL is any video URL (YouTube, Google Drive, etc.).
-    OUTPUT is the optional output filename (default: yt-dlp picks title-based name).
+    Uses yt-dlp as the primary downloader. For view-only Google Drive files
+    (where direct download is blocked), automatically falls back to Playwright
+    browser-based stream capture.
+
+    \b
+    URL     The video URL to download (YouTube, Google Drive, etc.)
+    OUTPUT  Optional output filename. If omitted, the video title is used.
+
+    \b
+    Quick start (no installation needed, just uv):
+      SCRIPT=https://raw.githubusercontent.com/CJHwong/toolkit/main/python/google_media_dl.py
+      uv run $SCRIPT -b chrome 'https://www.youtube.com/watch?v=VIDEO_ID'
+
+    \b
+    Or create a shell alias for convenience:
+      alias gdl='uv run https://raw.githubusercontent.com/CJHwong/toolkit/main/python/google_media_dl.py'
+      gdl -b chrome 'https://www.youtube.com/watch?v=VIDEO_ID'
+
+    \b
+    Authentication:
+      -b is required. It tells the tool which browser to read your Google
+      login cookies from, so private/authenticated videos just work.
+      Pick whichever browser you're logged into Google with:
+          uv run $SCRIPT -b chrome 'https://...'
+          uv run $SCRIPT -b firefox 'https://...'
+
+    \b
+    Prerequisites:
+      brew install yt-dlp ffmpeg          # required
+      uv run playwright install firefox   # only for Google Drive fallback
 
     \b
     Examples:
-        google_media_dl.py 'https://www.youtube.com/watch?v=VIDEO_ID'
-        google_media_dl.py -a 'https://music.youtube.com/watch?v=VIDEO_ID'
-        google_media_dl.py 'https://drive.google.com/file/d/FILE_ID/view'
-        google_media_dl.py -a URL                    # audio only
-        google_media_dl.py --no-headless -v URL       # visible browser (Playwright fallback)
+      # Download a YouTube video
+      uv run $SCRIPT -b chrome 'https://www.youtube.com/watch?v=dQw4w9WgXcQ'
+
+      # Download audio only from YouTube Music
+      uv run $SCRIPT -b chrome -a 'https://music.youtube.com/watch?v=VIDEO_ID'
+
+      # Download a view-only Google Drive video
+      uv run $SCRIPT -b firefox 'https://drive.google.com/file/d/FILE_ID/view'
+
+      # Debug Google Drive playback (visible browser + verbose)
+      uv run $SCRIPT -b chrome --no-headless -v 'https://drive.google.com/file/d/FILE_ID/view'
+
+      # Save with a specific filename
+      uv run $SCRIPT -b chrome 'https://drive.google.com/file/d/FILE_ID/view' lecture.mp4
     """
     # Step 1: Try yt-dlp first (works for YouTube, most sites, some GDrive)
     click.echo("Trying yt-dlp...")
     success, stderr = try_ytdlp(url, output, audio_only, browser, verbose)
     if success:
         return
+
+    # Check for auth errors and suggest -b flag
+    if re.search(r"HTTP Error (401|403)", stderr):
+        if browser:
+            hint = (
+                f"[AUTH] Got a 401/403 error. Your '{browser}' browser may not have "
+                "an active Google session, or the cookies couldn't be read.\n"
+                "  Try a different browser:  -b chrome  or  -b firefox"
+            )
+        else:
+            hint = (
+                "[AUTH] Got a 401/403 error. This video likely requires authentication.\n"
+                "  Use -b to specify a browser you're logged into Google with:\n"
+                "    -b chrome  or  -b firefox"
+            )
+        click.echo(hint, err=True)
 
     # Step 2: yt-dlp failed — fallback only for Google Drive
     if not is_google_drive_url(url):
@@ -602,6 +677,12 @@ def cli(
         raise click.ClickException("yt-dlp failed.")
 
     click.echo("yt-dlp failed. Falling back to Playwright stream capture...")
+
+    if not browser:
+        raise click.ClickException(
+            "Playwright fallback requires browser cookies.\n"
+            "  Specify a browser with:  -b chrome  or  -b firefox"
+        )
 
     file_id = extract_file_id(url)
     if not file_id:
