@@ -456,6 +456,18 @@ def cli(
     Cache and output are stored next to the input video.
 
     \b
+    Recommended workflow for best quality:
+      1. Run once with -v to generate the SRT:
+         auto_dub.py -l zh --target-lang en -v video.mp4
+      2. Review the SRT in <video_name>/transcript.srt (or transcript_<lang>.srt
+         for translations). AI transcription often misses names, numbers, or
+         domain terms. Fix these before the TTS stage turns them into audio.
+      3. Delete the segments you want to regenerate, or delete the whole
+         segments_* folder, then re-run. Cached segments are skipped.
+      4. To use a fully hand-edited SRT, pass --srt:
+         auto_dub.py --srt corrected.srt video.mp4
+
+    \b
     Examples:
       # Translate Chinese video to English (auto-extract speaker voice)
       auto_dub.py -l zh --target-lang en video.mp4
