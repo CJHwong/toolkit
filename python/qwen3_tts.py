@@ -2,7 +2,7 @@
 # requires-python = ">=3.12"
 # dependencies = [
 #     "transformers==5.4.0",
-#     "mlx-audio @ git+https://github.com/Blaizzy/mlx-audio.git@6408d2a410eb8c57464e07725b92271860199250",
+#     "mlx-audio==0.4.2",
 #     "click==8.3.1",
 #     "numpy==2.4.4",
 #     "soundfile==0.13.1",
