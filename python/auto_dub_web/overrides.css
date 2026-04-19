@@ -1,0 +1,119 @@
+/* Auto Dub — native-window overrides.
+   The prototype drew its own macOS window chrome (titlebar, traffic lights,
+   wallpaper) because it was shown inside a design-tool iframe. In the real
+   app the host NSWindow IS the window, so those elements shouldn't appear.
+*/
+
+html, body {
+  height: 100vh;
+  background: var(--bg);
+  overflow: hidden;
+}
+
+.desktop {
+  height: 100vh;
+  padding: 0;
+  background: var(--bg);
+  display: block;
+  overflow: hidden;
+}
+[data-theme="dark"] .desktop { background: var(--bg); }
+
+/* Real NSWindow frames the app; `.win` just fills it. Fixed height so the
+   runbar sticks to the bottom and inner regions (transcript, side-body)
+   own the scroll. */
+.win {
+  width: 100%;
+  min-width: 0;
+  height: 100vh;
+  min-height: 0;
+  max-height: 100vh;
+  border-radius: 0;
+  box-shadow: none;
+  overflow: hidden;
+}
+
+.titlebar { display: none; }
+
+/* Allow `.transcript` to actually shrink inside the flex column */
+.main { min-height: 0; }
+
+/* Cap the player so the transcript + bottom bar stay visible on smaller
+   windows. The <video> uses object-fit: contain so aspect is preserved. */
+.player { max-height: min(45vh, 420px); }
+.player-wrap { flex-shrink: 0; }
+
+/* Cap the reference transcript so long text doesn't blow out the sidebar */
+.ref-transcript {
+  max-height: 140px;
+  overflow-y: auto;
+}
+
+/* Slightly calmer group spacing — same information, more breathing room */
+.group { padding: 14px 20px; }
+.group-title { margin-bottom: 8px; }
+
+/* Wider sidebar so label + button on the same row don't fight */
+.side { width: 360px; }
+
+/* Real <video> fills the prototype's placeholder area */
+.player-video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  background: #000;
+  object-fit: contain;
+  z-index: 0;
+}
+
+/* Hide the prototype's static preview glyph once a real video is mounted */
+.player.has-video .player-placeholder { display: none; }
+
+/* Action buttons on every segment row are always visible. Hover-only
+   reveal was fighting focus-retention after click and made discoverability
+   worse, so we just keep them shown. */
+.seg-actions { opacity: 1 !important; }
+
+/* Hover affordance on the transcript text, mirroring the time fields so
+   it reads as editable without clicking first. */
+.seg-text[contenteditable="true"] {
+  transition: background 0.12s;
+  cursor: text;
+}
+.seg-text[contenteditable="true"]:hover {
+  background: var(--bg-elev);
+}
+
+/* Banners above the app body */
+.banner-error, .banner-warn {
+  padding: 10px 14px;
+  border-radius: 8px;
+  margin: 10px 20px;
+  font-size: 12.5px;
+  display: flex; gap: 10px; align-items: flex-start;
+  line-height: 1.5;
+}
+.banner-error {
+  background: color-mix(in oklch, var(--danger) 12%, var(--bg));
+  color: var(--danger);
+  border: 0.5px solid color-mix(in oklch, var(--danger) 40%, var(--line));
+}
+.banner-warn {
+  background: color-mix(in oklch, oklch(0.68 0.14 70) 10%, var(--bg));
+  color: oklch(0.45 0.14 70);
+  border: 0.5px solid color-mix(in oklch, oklch(0.68 0.14 70) 40%, var(--line));
+}
+.banner-error button, .banner-warn button {
+  margin-left: auto;
+  background: transparent; border: 0; cursor: pointer;
+  font-weight: 600; font-size: 12px;
+  color: inherit;
+}
+.banner-warn code {
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11.5px;
+  background: color-mix(in oklch, oklch(0.68 0.14 70) 8%, var(--bg));
+  padding: 1px 5px;
+  border-radius: 3px;
+}
