@@ -68,6 +68,40 @@ _SRC_ASSETS = [
 ]
 
 
+def _fetch_asset(url: str, dst: Path, pinned: bool) -> None:
+    """Populate `dst` from `url`, using an ETag sidecar for cheap freshness
+    checks on mutable refs. When `pinned` (a SHA), the file is immutable,
+    so skip the network as soon as we have a local copy.
+    """
+    etag_file = dst.with_suffix(dst.suffix + ".etag")
+    if dst.exists() and pinned:
+        return
+
+    req = urllib.request.Request(url)
+    if dst.exists() and etag_file.exists():
+        req.add_header("If-None-Match", etag_file.read_text().strip())
+
+    try:
+        with urllib.request.urlopen(req) as resp:
+            data = resp.read()
+            etag = resp.headers.get("ETag", "")
+        # Only announce actual downloads — 304 bypasses this (raises below).
+        print(f"[auto-dub] Fetched {dst.name}", file=sys.stderr, flush=True)
+        dst.write_bytes(data)
+        if etag:
+            etag_file.write_text(etag)
+    except urllib.error.HTTPError as e:
+        if e.code == 304:
+            return  # cached copy is current
+        if dst.exists():
+            return  # serve stale rather than blow up mid-launch
+        raise
+    except urllib.error.URLError:
+        if dst.exists():
+            return  # offline: serve stale
+        raise
+
+
 def _bootstrap_src_dir() -> Path:
     """Resolve a directory that contains auto_dub.py + auto_dub_web/.
 
@@ -75,7 +109,9 @@ def _bootstrap_src_dir() -> Path:
       1. $AUTO_DUB_SRC — explicit override (useful for local dev).
       2. The script's own parent, if it already contains the assets
          (e.g. running from a clone).
-      3. ~/.cache/auto-dub/src-<ref>/ — download-on-first-run cache.
+      3. ~/.cache/auto-dub/src-<ref>/ — cache keyed by ref. SHA refs
+         are treated as immutable; branch refs re-check with ETag each
+         launch so `main` stays current.
     """
     override = os.environ.get("AUTO_DUB_SRC")
     if override:
@@ -87,16 +123,12 @@ def _bootstrap_src_dir() -> Path:
     if (here / "auto_dub.py").is_file() and (here / "auto_dub_web").is_dir():
         return here
 
+    pinned = bool(re.fullmatch(r"[0-9a-f]{7,40}", _SRC_REF))
     cache = Path.home() / ".cache" / "auto-dub" / f"src-{_SRC_REF}"
     (cache / "auto_dub_web").mkdir(parents=True, exist_ok=True)
     for rel in _SRC_ASSETS:
-        dst = cache / rel
-        if dst.exists():
-            continue
         url = f"https://raw.githubusercontent.com/{_SRC_REPO}/{_SRC_REF}/python/{rel}"
-        print(f"[auto-dub] Fetching {rel}...", file=sys.stderr, flush=True)
-        with urllib.request.urlopen(url) as resp:
-            dst.write_bytes(resp.read())
+        _fetch_asset(url, cache / rel, pinned)
     return cache
 
 
