@@ -36,20 +36,80 @@ import os
 import re
 import signal
 import subprocess
+import sys
 import threading
 import time
 import traceback
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
 
+# ─── Self-bootstrap ───────────────────────────────────────────────
+# Enable the one-liner form:
+#   uv run https://raw.githubusercontent.com/CJHwong/toolkit/<ref>/python/auto_dub_gui.py
+# uv only fetches THIS script, so the sibling `auto_dub` module and the
+# `auto_dub_web/` asset tree aren't on disk. If that's the case, fetch
+# them from the same repo ref into ~/.cache/auto-dub/src-<ref>/ once and
+# point the rest of the code at that dir. Running from a clone is still
+# detected (sibling files present) and uses the clone directly.
+_SRC_REPO = os.environ.get("AUTO_DUB_REPO", "CJHwong/toolkit")
+_SRC_REF = os.environ.get("AUTO_DUB_REF", "main")
+_SRC_ASSETS = [
+    "auto_dub.py",
+    "auto_dub_web/index.html",
+    "auto_dub_web/styles.css",
+    "auto_dub_web/overrides.css",
+    "auto_dub_web/data.jsx",
+    "auto_dub_web/icons.jsx",
+    "auto_dub_web/player.jsx",
+    "auto_dub_web/side-panel.jsx",
+    "auto_dub_web/app.jsx",
+]
+
+
+def _bootstrap_src_dir() -> Path:
+    """Resolve a directory that contains auto_dub.py + auto_dub_web/.
+
+    Preference order:
+      1. $AUTO_DUB_SRC — explicit override (useful for local dev).
+      2. The script's own parent, if it already contains the assets
+         (e.g. running from a clone).
+      3. ~/.cache/auto-dub/src-<ref>/ — download-on-first-run cache.
+    """
+    override = os.environ.get("AUTO_DUB_SRC")
+    if override:
+        p = Path(override).expanduser().resolve()
+        if (p / "auto_dub.py").is_file() and (p / "auto_dub_web").is_dir():
+            return p
+
+    here = Path(__file__).resolve().parent
+    if (here / "auto_dub.py").is_file() and (here / "auto_dub_web").is_dir():
+        return here
+
+    cache = Path.home() / ".cache" / "auto-dub" / f"src-{_SRC_REF}"
+    (cache / "auto_dub_web").mkdir(parents=True, exist_ok=True)
+    for rel in _SRC_ASSETS:
+        dst = cache / rel
+        if dst.exists():
+            continue
+        url = f"https://raw.githubusercontent.com/{_SRC_REPO}/{_SRC_REF}/python/{rel}"
+        print(f"[auto-dub] Fetching {rel}...", file=sys.stderr, flush=True)
+        with urllib.request.urlopen(url) as resp:
+            dst.write_bytes(resp.read())
+    return cache
+
+
+_SRC_DIR = _bootstrap_src_dir()
+sys.path.insert(0, str(_SRC_DIR))
+
 import webview
 
-import auto_dub
-from auto_dub import Callbacks, TranscriptPrep
+import auto_dub  # noqa: E402
+from auto_dub import Callbacks, TranscriptPrep  # noqa: E402
 
-APP_ROOT = Path(__file__).resolve().parent
-WEB_ROOT = APP_ROOT / "auto_dub_web"
+APP_ROOT = _SRC_DIR
+WEB_ROOT = _SRC_DIR / "auto_dub_web"
 RECENTS_FILE = Path.home() / ".cache" / "auto-dub" / "recents.json"
 RECENTS_MAX = 10
 
