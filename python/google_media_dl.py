@@ -352,21 +352,24 @@ def capture_streams(
         log(f"Navigating to {url}...", verbose)
         page.goto(url, wait_until="domcontentloaded")
 
-        # Extract title
+        # Extract title. Prefer the document <title> (Drive sets it to the real
+        # filename), then fall back to the view-only viewer's filename anchor.
+        # The previous [data-tooltip-unhoverable='true'] selector matched dozens
+        # of unrelated tooltip controls (toolbar buttons, avatar tooltips) and
+        # produced a doubled string from a hidden tooltip-positioning clone.
         try:
-            title_el = page.wait_for_selector(
-                "[data-tooltip-unhoverable='true'], .uc-name-size a",
-                timeout=10000,
-            )
-            if title_el:
-                title = title_el.text_content()
+            page_title = page.title() or ""
+            page_title = re.sub(r"\s*-\s*Google Drive\s*$", "", page_title).strip()
+            if page_title and page_title.lower() != "google drive":
+                title = page_title
         except Exception:
             pass
 
         if not title:
             try:
-                title = page.title()
-                title = re.sub(r"\s*-\s*Google Drive\s*$", "", title).strip()
+                title_el = page.wait_for_selector(".uc-name-size a", timeout=5000)
+                if title_el:
+                    title = (title_el.text_content() or "").strip() or None
             except Exception:
                 pass
 
