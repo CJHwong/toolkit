@@ -20,8 +20,11 @@ USAGE:
     # Basic transcription
     uv run $URL audio.mp3
 
-    # Chinese audio (auto-selects breeze model)
+    # Chinese audio (auto-selects breeze25 model)
     uv run $URL -l zh audio.mp3
+
+    # Taiwanese Hokkien audio (auto-selects breeze26 model)
+    uv run $URL -l zh-min-nan audio.mp3
 
     # Live microphone transcription
     uv run $URL --live
@@ -69,11 +72,19 @@ MODELS:
     Standard models (auto-download via pywhispercpp):
         tiny, base, small, medium, large-v1, large-v2, large-v3, large-v3-turbo
 
-    Breeze models for Chinese (auto-download from HuggingFace):
-        breeze      - 3.09 GB (full precision)
-        breeze-q8   - 1.66 GB (default for zh, good accuracy/size balance)
-        breeze-q5   - 1.08 GB
-        breeze-q4   - 889 MB (smallest)
+    Breeze 25 models for Chinese / Mandarin (auto-download from HuggingFace):
+        breeze25      - 3.09 GB (full precision)
+        breeze25-q8   - 1.66 GB (default for zh, good accuracy/size balance)
+        breeze25-q5   - 1.08 GB
+        breeze25-q4   - 889 MB (smallest)
+        breeze, breeze-q8, breeze-q5, breeze-q4
+                      - aliases for breeze25 variants
+
+    Breeze 26 models for zh-min-nan / Taiwanese Hokkien (auto-download from HuggingFace):
+        breeze26      - 1.66 GB (default q8)
+        breeze26-q8   - 1.66 GB
+        breeze26-q5   - 1.08 GB
+        breeze26-q4   - 889 MB
 
     Custom model: provide absolute path to .bin file
 
@@ -83,7 +94,8 @@ REQUIREMENTS:
 NOTES:
     - First run downloads models (~1.5-3GB depending on model)
     - Models are cached in ~/Library/Application Support/pywhispercpp/models/
-    - zh* languages auto-select breeze-q8, others use large-v3-turbo
+    - zh-min-nan / hokkien / taigi auto-selects breeze26
+    - other zh* languages auto-select breeze25-q8, others use large-v3-turbo
     - Supports: mp3, mp4, m4a, wav, webm, mov, m3u8, and HTTP(S) URLs
 """
 import json
@@ -99,17 +111,31 @@ from pydub.silence import detect_silence
 from pywhispercpp.constants import MODELS_DIR
 from pywhispercpp.model import Model
 
-# HuggingFace repository for Breeze ASR model
+# HuggingFace repository for Breeze ASR 25 model
 BREEZE_REPO = "alan314159/Breeze-ASR-25-whispercpp"
 BREEZE_VARIANTS = {
-    "breeze": "ggml-model.bin",  # 3.09 GB full precision
-    "breeze-q8": "ggml-model-q8_0.bin",  # 1.66 GB (default for zh)
-    "breeze-q5": "ggml-model-q5_k.bin",  # 1.08 GB
-    "breeze-q4": "ggml-model-q4_k.bin",  # 889 MB
+    "breeze25": "ggml-model.bin",  # 3.09 GB full precision
+    "breeze25-q8": "ggml-model-q8_0.bin",  # 1.66 GB (default for zh)
+    "breeze25-q5": "ggml-model-q5_k.bin",  # 1.08 GB
+    "breeze25-q4": "ggml-model-q4_k.bin",  # 889 MB
+    # Backward-compatible aliases
+    "breeze": "ggml-model.bin",
+    "breeze-q8": "ggml-model-q8_0.bin",
+    "breeze-q5": "ggml-model-q5_k.bin",
+    "breeze-q4": "ggml-model-q4_k.bin",
+}
+
+# HuggingFace repository for Breeze ASR 26 model
+BREEZE26_REPO = "phate334/Breeze-ASR-26-GGML"
+BREEZE26_VARIANTS = {
+    "breeze26": "ggml-model-q8_0.bin",  # 1.66 GB (default for breeze26)
+    "breeze26-q8": "ggml-model-q8_0.bin",  # 1.66 GB
+    "breeze26-q5": "ggml-model-q5_0.bin",  # 1.08 GB
+    "breeze26-q4": "ggml-model-q4_0.bin",  # 889 MB (smallest)
 }
 
 # Default models by language
-DEFAULT_MODEL_ZH = "breeze-q8"
+DEFAULT_MODEL_ZH = "breeze25-q8"
 DEFAULT_MODEL_OTHER = "large-v3-turbo"
 
 
@@ -132,7 +158,10 @@ def resolve_model_path(model_arg: str | None, language: str, verbose: bool = Fal
     # Determine effective model name
     if model_arg is None:
         lang_lower = (language or "").lower()
-        if lang_lower.startswith("zh"):
+        if "min-nan" in lang_lower or "hokkien" in lang_lower or "taigi" in lang_lower:
+            model_arg = "breeze26"
+            log(f"Auto-selected model '{model_arg}' for language '{language}'", verbose)
+        elif lang_lower.startswith("zh"):
             model_arg = DEFAULT_MODEL_ZH
             log(f"Auto-selected model '{model_arg}' for language '{language}'", verbose)
         else:
@@ -147,20 +176,33 @@ def resolve_model_path(model_arg: str | None, language: str, verbose: bool = Fal
         return model_arg
 
     # Breeze variant: download from HuggingFace
+    breeze_repo = None
+    breeze_filename = None
+    breeze_subdir = None
     if model_arg in BREEZE_VARIANTS:
-        filename = BREEZE_VARIANTS[model_arg]
-        cache_dir = Path(MODELS_DIR) / "breeze"
+        breeze_repo = BREEZE_REPO
+        breeze_filename = BREEZE_VARIANTS[model_arg]
+        breeze_subdir = "breeze"
+    elif model_arg in BREEZE26_VARIANTS:
+        breeze_repo = BREEZE26_REPO
+        breeze_filename = BREEZE26_VARIANTS[model_arg]
+        # 26 shares filenames (ggml-model-q8_0.bin) with 25; keep it in its
+        # own dir so the two model families never clobber each other's cache.
+        breeze_subdir = "breeze26"
+
+    if breeze_repo:
+        cache_dir = Path(MODELS_DIR) / breeze_subdir
         cache_dir.mkdir(parents=True, exist_ok=True)
 
-        local_path = cache_dir / filename
+        local_path = cache_dir / breeze_filename
         if local_path.exists():
             log(f"Using cached breeze model: {local_path}", verbose)
             return str(local_path)
 
-        log(f"Downloading {model_arg} from HuggingFace ({filename})...", verbose)
+        log(f"Downloading {model_arg} from HuggingFace ({breeze_filename})...", verbose)
         downloaded_path = hf_hub_download(
-            repo_id=BREEZE_REPO,
-            filename=filename,
+            repo_id=breeze_repo,
+            filename=breeze_filename,
             local_dir=cache_dir,
         )
         log(f"Model downloaded to: {downloaded_path}", verbose)
