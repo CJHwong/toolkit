@@ -2,10 +2,10 @@
 # /// script
 # requires-python = ">=3.10,<3.12"
 # dependencies = [
-#   "realesrgan",
-#   "opencv-python-headless",
+#   "realesrgan==0.3.0",
+#   "opencv-python-headless==4.11.0.86",
 #   "torchvision==0.15.2",
-#   "numpy<2",
+#   "numpy==1.26.4",
 # ]
 # ///
 

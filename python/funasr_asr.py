@@ -1,9 +1,9 @@
 # /// script
 # requires-python = ">=3.10"
 # dependencies = [
-#     "funasr>=1.2.9",
-#     "torch",
-#     "torchaudio",
+#     "funasr==1.3.11",
+#     "torch==2.12.1",
+#     "torchaudio==2.11.0",
 #     "click==8.3.1",
 #     "pydub==0.25.1",
 #     "httpx==0.28.1",
