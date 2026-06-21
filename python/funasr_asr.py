@@ -13,20 +13,23 @@
 FunASR CLI - Audio transcription using FunASR (Paraformer) on CPU/MPS.
 
 USAGE:
+    # Run directly from GitHub (no clone needed):
+    URL=https://raw.githubusercontent.com/CJHwong/toolkit/main/python/funasr_asr.py
+
     # Basic transcription (Chinese + English code-switching)
-    uv run funasr_asr.py audio.mp3
+    uv run $URL audio.mp3
 
     # Force CPU (skip Apple GPU / MPS)
-    uv run funasr_asr.py -d cpu audio.mp3
+    uv run $URL -d cpu audio.mp3
 
     # SRT subtitles output
-    uv run funasr_asr.py -f srt -o subtitles.srt video.mp4
+    uv run $URL -f srt -o subtitles.srt video.mp4
 
     # From URL
-    uv run funasr_asr.py https://example.com/audio.mp3
+    uv run $URL https://example.com/audio.mp3
 
     # JSON output with timing metadata
-    uv run funasr_asr.py -f json audio.mp3
+    uv run $URL -f json audio.mp3
 
 MODELS:
     funasr/paraformer-zh             220M, Chinese + English, timestamps (default)

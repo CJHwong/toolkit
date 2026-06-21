@@ -11,26 +11,29 @@
 Qwen3-ASR CLI - Audio transcription using mlx-audio on Apple Silicon.
 
 USAGE:
+    # Run directly from GitHub (no clone needed):
+    URL=https://raw.githubusercontent.com/CJHwong/toolkit/main/python/qwen3_asr.py
+
     # Basic transcription (auto-detect language)
-    uv run qwen3_asr.py audio.mp3
+    uv run $URL audio.mp3
 
     # Chinese audio
-    uv run qwen3_asr.py -l zh audio.mp3
+    uv run $URL -l zh audio.mp3
 
     # Larger model for better accuracy
-    uv run qwen3_asr.py -m mlx-community/Qwen3-ASR-1.7B-8bit audio.mp3
+    uv run $URL -m mlx-community/Qwen3-ASR-1.7B-8bit audio.mp3
 
     # SRT subtitles output
-    uv run qwen3_asr.py -f srt -o subtitles.srt video.mp4
+    uv run $URL -f srt -o subtitles.srt video.mp4
 
     # From URL
-    uv run qwen3_asr.py https://example.com/audio.mp3
+    uv run $URL https://example.com/audio.mp3
 
     # JSON output with timing metadata
-    uv run qwen3_asr.py -f json audio.mp3
+    uv run $URL -f json audio.mp3
 
     # Multiple files (concatenated)
-    uv run qwen3_asr.py part1.mp3 part2.mp3
+    uv run $URL part1.mp3 part2.mp3
 
 MODELS:
     mlx-community/Qwen3-ASR-0.6B-8bit   ~1.0 GB (default, fast)

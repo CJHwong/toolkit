@@ -18,11 +18,14 @@ facets from uncached sessions.  Stage 5 (insight generation) uses Ollama to
 generate narrative insights from aggregated statistics.
 
 USAGE:
-    uv run python/cc_insights.py
-    uv run python/cc_insights.py -v --max-extract 0      # cache + placeholders only
-    uv run python/cc_insights.py -v --max-extract 5       # extract 5 uncached facets
-    uv run python/cc_insights.py --model qwen3:30b        # use a different model
-    uv run python/cc_insights.py -o ~/Desktop/insights.html
+    # Run directly from GitHub (no clone needed):
+    URL=https://raw.githubusercontent.com/CJHwong/toolkit/main/python/cc_insights.py
+
+    uv run $URL
+    uv run $URL -v --max-extract 0    # cache + placeholders only
+    uv run $URL -v --max-extract 5    # extract 5 uncached facets
+    uv run $URL --model qwen3:30b     # use a different model
+    uv run $URL -o ~/Desktop/insights.html
 """
 
 from __future__ import annotations
