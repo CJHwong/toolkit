@@ -79,3 +79,35 @@ the header. Metadata resolution only, no full downloads, so this is cheap.
 Git sources in `[tool.uv.sources]` are the one exception to `==` (they are not
 PyPI versions); pin them by `rev` to a commit when the upstream is stable
 enough to.
+
+## Pin what the upstream left loose
+
+A wrapped package often declares its own stack with `>=`, which puts the
+script back at the mercy of whatever resolves that day. When a script wraps a
+third-party port, pin that port's core stack in your own header too, and say in
+a comment why. `dots_tts.py` pins `mlx-lm` because a loose resolve picks a
+version whose module layout the port cannot import; `index_tts.py` pins the
+MLX pair for the same reason.
+
+## Verify an audio script with a real run
+
+A TTS or ASR script is not verified by a `--help` that exits 0. Generate real
+audio and measure it. Two axes, both scripted, and both are needed:
+
+- **Intelligibility**: transcribe the output with `whisper.py` and diff the
+  round-trip against the input text. Text-frontend bugs produce fluent,
+  confident, wrong speech that a casual listen does not catch.
+- **Voice fidelity**: `spk_sim.py` for ECAPA cosine similarity between the
+  reference clip and the clone.
+
+Read both. A clone can score high similarity while the words are destroyed, so
+either number alone will call a broken run a pass. Control for the instrument
+before blaming the model: transcribe the reference clip itself, and if the ASR
+mangles that too, the ASR is the problem.
+
+Report generation cost with every run: audio length, wall clock, and RTF. RTF
+is hardware bound and varies several fold across Apple Silicon generations, so
+a number without its machine is meaningless.
+
+What each wrapped model actually does, as opposed to what its docs claim, lives
+in `python/CLAUDE.md`. Read it before promising a capability.

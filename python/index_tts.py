@@ -70,8 +70,12 @@ NOTES:
     - Apple Silicon only (MLX is Metal-only). macOS 13 or later.
     - The first run downloads ~5GB into the Hugging Face cache. Point
       --model-dir at a local dir to skip this. Set HF_TOKEN for a gated repo.
-    - The reference clip drives the accent and the delivery. Clean speech of
-      5s to 15s works best; noise in the clip lands in the output.
+    - Output quality is capped by reference quality. Clean speech of 5s to 15s
+      works best; noise in the clip lands in the output, and a synthetic
+      reference (macOS `say`) gives synthetic-sounding speech.
+    - The reference carries timbre, not accent. A 台灣腔 reference still reads
+      in mainland Mandarin, and a British reference still reads American. Pick
+      the reference for voice, not for regional delivery.
     - This port drops the emotion control of upstream IndexTTS-2. Inline
       special tokens such as <|Laughter|> or [laugh] are not supported and
       give unpredictable results. Express emotion through the reference clip.
@@ -82,6 +86,18 @@ NOTES:
       also maps Taiwan vocabulary to its mainland form (軟體 -> 软件). Pass
       --no-convert to send the text through untouched. Only the characters
       change; the cloned voice and the accent are unaffected.
+    - An abbreviation written with a slash is misread. "HB/L No." came back as
+      "HVAC call number" and "HBALF L number" across four references. Write it
+      without the slash ("HBL No.") and it reads correctly. --no-normalization
+      does not help, so this is the model, not wetext.
+    - --duration-factor is linear: measured 0.599 / 0.799 / 1.298 / 1.598 of
+      the baseline length at 0.6 / 0.8 / 1.3 / 1.6, so a target duration is one
+      shot. Unlike an ffmpeg atempo stretch, the model really speaks slower, so
+      pitch stays natural. A higher factor also lowers RTF.
+    - Speed is hardware bound. On the same 24.7s output, warm: RTF 1.38 on an
+      M1 Pro, 0.56 on an M5 Pro. The first run after boot pays Metal kernel
+      compilation (30.3s vs 13.8s on the same machine), so budget for a slow
+      first item in a batch.
     - Supports piped input: echo "text" | uv run index_tts.py -r ref.wav -l en
 """
 import platform
