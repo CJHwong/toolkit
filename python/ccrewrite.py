@@ -62,6 +62,7 @@ INSTALL DETAIL:
 """
 
 import argparse
+import functools
 import json
 import re
 import os
@@ -287,6 +288,28 @@ def real_codex_home() -> Path:
     return Path.home() / ".codex"
 
 
+# A version manager (mise, asdf, pyenv, rbenv) puts a shim on PATH in place of
+# the real binary. A shim reads its own config and trust state from $HOME, and
+# isolated_env replaces $HOME, so launching through one dies with a trust error
+# before codex ever starts. Resolve past the shim to the binary behind it.
+SHIM_DIR = f"{os.sep}shims{os.sep}"
+
+
+@functools.cache
+def codex_binary() -> str | None:
+    """The real codex executable, or None. Never a version manager's shim."""
+    found = shutil.which("codex")
+    if found is None or SHIM_DIR not in found:
+        return found
+    for directory in os.environ.get("PATH", "").split(os.pathsep):
+        if not directory or SHIM_DIR in f"{directory}{os.sep}":
+            continue
+        candidate = Path(directory) / "codex"
+        if os.access(candidate, os.X_OK):
+            return str(candidate)
+    return found
+
+
 def isolated_env(scratch: Path) -> dict:
     """Keep codex's own context out of the request.
 
@@ -340,7 +363,7 @@ def disable_flags(env: dict) -> list[str]:
     """
     try:
         listed = subprocess.run(
-            ["codex", "features", "list"], env=env, capture_output=True, text=True, timeout=15
+            [codex_binary(), "features", "list"], env=env, capture_output=True, text=True, timeout=15
         )
     except (OSError, subprocess.TimeoutExpired):
         return []
@@ -359,7 +382,7 @@ def codex_argv(
     workspace: Path, answer: Path, env: dict, prompt: str, model: str, effort: str
 ) -> list[str]:
     argv = [
-        "codex",
+        codex_binary(),
         "exec",
         "--ephemeral",
         "--skip-git-repo-check",
@@ -385,7 +408,7 @@ def rewrite(
     budget: float = CODEX_TIMEOUT,
 ) -> str:
     """Send one message to codex. Raise RuntimeError with a printable reason."""
-    if shutil.which("codex") is None:
+    if codex_binary() is None:
         raise RuntimeError("codex is not on PATH")
 
     prompt = PROMPT_ZH if is_chinese(raw) else PROMPT_EN
@@ -653,11 +676,11 @@ SAMPLE_ZH = (
 
 
 def cmd_check(args: argparse.Namespace) -> int:
-    if shutil.which("codex") is None:
+    if codex_binary() is None:
         print("codex is not on PATH. Install it first.", file=sys.stderr)
         return 1
 
-    print(f"codex   {shutil.which('codex')}")
+    print(f"codex   {codex_binary()}")
     print(f"model   {args.model} at {args.effort} effort")
 
     failed = 0
