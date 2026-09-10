@@ -33,6 +33,7 @@ USAGE:
     uv run "$URL" check                     # one real round trip, with timings
     uv run "$URL" rewrite "你的文字"          # rewrite one string, print it, exit
     pbpaste | uv run "$URL" rewrite --time   # or read stdin, so newlines survive
+    uv run "$URL" rewrite --timeout 600 < long.md   # past the 100s default
     uv run "$URL" install --lang zh         # rewrite Chinese, leave the rest alone
     uv run "$URL" install --lang all        # rewrite every message
     uv run "$URL" install --lang zh --scope project
@@ -57,6 +58,13 @@ WHAT IT COSTS:
 
     Any failure prints the original text under a `[edit] kept as written` line, so a
     broken hook never eats a message.
+
+    A rewrite costs about 15 seconds plus 9ms per character, measured on
+    gpt-5.6-luna over 1000, 3000 and 6000-character Chinese inputs. The model
+    emits roughly as many characters as it reads, so output length sets the
+    cost, not reasoning. CODEX_TIMEOUT of 100s therefore gives out near 9300
+    characters. The hook keeps that default on purpose, because nobody waits
+    minutes to read a message. `rewrite --timeout` raises it for a document.
 
 INSTALL DETAIL:
     `install` copies this file to ~/.claude/hooks/ccrewrite.py and points the
@@ -716,7 +724,7 @@ def cmd_rewrite(args: argparse.Namespace) -> int:
 
     began = time.monotonic()
     try:
-        said = rewrite(raw, args.model, args.effort)
+        said = rewrite(raw, args.model, args.effort, args.timeout)
     except RuntimeError as err:
         print(err, file=sys.stderr)
         return 1
@@ -761,6 +769,16 @@ def main() -> int:
     prose = sub.add_parser("rewrite", help="rewrite text from an argument or stdin")
     prose.add_argument("text", nargs="*", help="the text to rewrite. Omit it to read stdin.")
     prose.add_argument("--time", action="store_true", help="print the elapsed time on stderr")
+    prose.add_argument(
+        "--timeout",
+        type=float,
+        default=CODEX_TIMEOUT,
+        metavar="SECONDS",
+        help=(
+            f"how long to wait for codex, default {CODEX_TIMEOUT:.0f}. A rewrite costs"
+            " about 15s plus 9ms per character, so raise this for a long document."
+        ),
+    )
     prose.set_defaults(run=cmd_rewrite)
 
     listen = sub.add_parser("hook", help="read a MessageDisplay hook payload on stdin")
