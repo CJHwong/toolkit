@@ -319,11 +319,30 @@ def leftovers() -> list[Path]:
     return spools + [entry for entry in scratch if entry.is_dir()]
 
 
+def last_touched(entry: Path) -> float:
+    """The newest mtime anywhere under a directory.
+
+    A directory's own mtime moves only when its immediate entries change, so a
+    live run whose codex writes into codex-home still looks as old as the moment
+    it started. Judging staleness by the root alone would delete the scratch dir
+    of any run longer than STALE_AFTER while it was still using it. lstat, not
+    stat: the scratch holds a symlink to the real auth.json, whose mtime says
+    nothing about this run.
+    """
+    newest = entry.lstat().st_mtime
+    for child in entry.rglob("*"):
+        try:
+            newest = max(newest, child.lstat().st_mtime)
+        except OSError:
+            continue  # vanished mid-walk
+    return newest
+
+
 def purge_stale(older_than: float) -> None:
     cutoff = time.time() - older_than
     for entry in leftovers():
         try:
-            expired = entry.stat().st_mtime < cutoff
+            expired = last_touched(entry) < cutoff
         except OSError:
             continue  # another run swept it first
         if expired:
