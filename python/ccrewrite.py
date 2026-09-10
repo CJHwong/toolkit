@@ -57,7 +57,10 @@ WHAT IT COSTS:
     removes. See isolated_env, TRIM_CONFIG, and disable_flags for the rest.
 
     Any failure prints the original text under a `[edit] kept as written` line, so a
-    broken hook never eats a message.
+    broken hook never eats a message. Under that line comes what codex printed,
+    in a code block, minus the prompt codex echoes back. Both ends of that output
+    matter: codex opens with a banner and ends with the error, a version-manager
+    shim does the opposite, so it is never cut to fit.
 
     A rewrite costs about 15 seconds plus 9ms per character, measured on
     gpt-5.6-luna over 1000, 3000 and 6000-character Chinese inputs. The model
@@ -130,6 +133,10 @@ def skip_over(budget: float = CODEX_TIMEOUT) -> int:
 # prints the original text, so pointing at ctrl+o there would be noise.
 ORIGINAL_HINT = "ctrl+o for the original"
 REASON_LIMIT = 160
+
+# A failure is rare and worth reading, so it shows what the tool printed rather
+# than a fragment of it. Deep enough for a stack trace, short enough to scroll.
+DETAIL_LINES = 16
 
 # Rewrite Chinese only. English messages then cost nothing and appear the moment
 # the stream ends, which keeps the blank window off the messages that do not
@@ -229,17 +236,21 @@ def status(how: str) -> str:
     return f"*{MARK} {how}*\n\n"
 
 
-def keep_original(raw: str, why: str) -> str:
-    return status(f"kept as written, {why}") + raw.rstrip()
+def keep_original(raw: str, why: str, output: str = "") -> str:
+    return status(f"kept as written, {why}") + fenced(output) + raw.rstrip()
+
+
+def fenced(output: str) -> str:
+    """A code block holding what the tool printed, or nothing when it said nothing."""
+    return f"```\n{output}\n```\n\n" if output else ""
 
 
 def parse_batch(stream) -> dict:
+    """The batch payload. Raise when the json is unreadable or belongs elsewhere."""
     payload = json.load(stream)
     event = payload.get("hook_event_name", "")
     if event and event != EVENT:
         raise ValueError(f"hook event is {event}, not {EVENT}")
-    if not payload.get("message_id"):
-        raise ValueError("hook json has no message_id")
     return payload
 
 
@@ -266,6 +277,8 @@ def batch_dir(message_id: str) -> Path:
 
 
 def store_batch(message_id: str, index: int, delta: str) -> None:
+    if not message_id:
+        raise ValueError("hook json has no message_id")
     target = batch_dir(message_id)
     target.mkdir(parents=True, exist_ok=True)
     handle, temp = tempfile.mkstemp(dir=target, prefix=".part-")
@@ -295,13 +308,25 @@ def forget(message_id: str) -> None:
     shutil.rmtree(batch_dir(message_id), ignore_errors=True)
 
 
-def purge_stale(older_than: float) -> None:
+def leftovers() -> list[Path]:
+    """Every directory a run can leave behind: batch spools, and the scratch dir
+    of a codex that outlived the kill and beat TemporaryDirectory to its files.
+    A stale scratch holds a symlink to the real auth.json, so it must not sit
+    in the temp directory until the operating system decides to sweep it."""
     root = spool_root()
-    if not root.is_dir():
-        return
+    spools = [entry for entry in root.iterdir() if entry.is_dir()] if root.is_dir() else []
+    scratch = Path(tempfile.gettempdir()).glob(f"{SPOOL_PREFIX}-run-*")
+    return spools + [entry for entry in scratch if entry.is_dir()]
+
+
+def purge_stale(older_than: float) -> None:
     cutoff = time.time() - older_than
-    for entry in root.iterdir():
-        if entry.is_dir() and entry.stat().st_mtime < cutoff:
+    for entry in leftovers():
+        try:
+            expired = entry.stat().st_mtime < cutoff
+        except OSError:
+            continue  # another run swept it first
+        if expired:
             shutil.rmtree(entry, ignore_errors=True)
 
 
@@ -428,6 +453,14 @@ def codex_argv(
     return argv + disable_flags(env) + ["-o", str(answer), prompt]
 
 
+class CodexFailed(RuntimeError):
+    """A rewrite that did not happen, plus whatever codex printed before it stopped."""
+
+    def __init__(self, why: str, output: str = "", echo: str = "") -> None:
+        super().__init__(why)
+        self.output = detail(output, echo)
+
+
 def rewrite(
     raw: str,
     model: str = DEFAULT_MODEL,
@@ -436,9 +469,10 @@ def rewrite(
 ) -> str:
     """Send one message to codex. Raise RuntimeError with a printable reason."""
     if codex_binary() is None:
-        raise RuntimeError("codex is not on PATH")
+        raise CodexFailed("codex is not on PATH")
 
     prompt = PROMPT_ZH if is_chinese(raw) else PROMPT_EN
+    sent = f"{prompt}\n{raw}"  # codex echoes both onto stderr, so detail can strip them
 
     with tempfile.TemporaryDirectory(prefix=f"{SPOOL_PREFIX}-run-") as scratch:
         workspace = Path(scratch) / "workspace"
@@ -454,27 +488,52 @@ def rewrite(
                 text=True,
                 timeout=budget,
             )
-        except subprocess.TimeoutExpired:
-            raise RuntimeError(f"codex took longer than {budget:.0f}s") from None
+        except subprocess.TimeoutExpired as err:
+            raise CodexFailed(
+                f"codex took longer than {budget:.0f}s", decoded(err.stderr), sent
+            ) from None
 
         if done.returncode != 0:
-            raise RuntimeError(f"codex exited {done.returncode}: {tail(done.stderr)}")
+            raise CodexFailed(f"codex exited {done.returncode}", done.stderr, sent)
         if not answer.exists():
-            raise RuntimeError(f"codex wrote no answer: {tail(done.stderr)}")
+            raise CodexFailed("codex wrote no answer", done.stderr, sent)
 
         said = answer.read_text(encoding="utf-8").strip()
         if not said:
-            raise RuntimeError("codex said nothing")
+            raise CodexFailed("codex said nothing", done.stderr, sent)
         return said
 
 
-def tail(text: str) -> str:
+def oneline(text: str) -> str:
+    """A python exception squeezed onto the status line."""
     line = " ".join(text.split())
-    if not line:
-        return "no output"
-    if len(line) > REASON_LIMIT:
-        return line[-REASON_LIMIT:]
-    return line
+    return line[:REASON_LIMIT] if line else "no reason given"
+
+
+def decoded(stream) -> str:
+    """subprocess.run decodes stdout and stderr under text=True, but a
+    TimeoutExpired hands back the raw buffer instead. Decode it here."""
+    if stream is None:
+        return ""
+    return stream if isinstance(stream, str) else stream.decode("utf-8", "replace")
+
+
+def detail(text: str, echo: str = "") -> str:
+    """What the tool printed, kept whole. Never cut a line in half: which end
+    holds the diagnosis depends on the tool. codex opens with a banner and ends
+    with the error, mise opens with the error and ends with its version. Cutting
+    to a character count turned both into noise.
+
+    codex also echoes the prompt and the message back onto stderr, which buries
+    the error under our own input. `echo` carries what this script sent, so those
+    lines come back out. What is left is what codex had to say for itself."""
+    sent = {line.strip() for line in echo.splitlines() if line.strip()}
+    kept = [
+        line.rstrip()
+        for line in text.splitlines()
+        if line.strip() and line.strip() not in sent
+    ]
+    return "\n".join(kept[-DETAIL_LINES:])
 
 
 # --- hook command ------------------------------------------------------------
@@ -484,9 +543,18 @@ def run_hook(args: argparse.Namespace) -> int:
     """Never raise. A hook that crashes hides the message it was given."""
     try:
         payload = parse_batch(sys.stdin)
-        store_batch(payload["message_id"], int(payload.get("index", 0)), payload.get("delta", ""))
     except Exception:
+        # Unreadable json carries no delta to echo back, so silence is the only
+        # answer that does not wipe the text off the screen.
         respond_untouched()
+        return 0
+
+    delta = payload.get("delta", "")
+    try:
+        store_batch(payload.get("message_id", ""), int(payload.get("index", 0)), delta)
+    except Exception as err:
+        # The delta survived the json, so say what broke and show it anyway.
+        respond(status(f"kept as written, {oneline(str(err))}") + delta)
         return 0
 
     if not payload.get("final"):
@@ -496,7 +564,7 @@ def run_hook(args: argparse.Namespace) -> int:
     try:
         respond(final_display(payload, args))
     except Exception as err:
-        respond(status(f"kept as written, {tail(str(err))}"))
+        respond(status(f"kept as written, {oneline(str(err))}"))
     finally:
         forget(payload["message_id"])
         purge_stale(STALE_AFTER)
@@ -537,8 +605,8 @@ def final_display(payload: dict, args: argparse.Namespace) -> str:
     began = time.monotonic()
     try:
         said = rewrite(raw, args.model, args.effort)
-    except RuntimeError as err:
-        return keep_original(raw, str(err))
+    except CodexFailed as err:
+        return keep_original(raw, str(err), err.output)
     return status(f"rewrote in {time.monotonic() - began:.1f}s, {ORIGINAL_HINT}") + said
 
 
@@ -745,8 +813,10 @@ def cmd_rewrite(args: argparse.Namespace) -> int:
     began = time.monotonic()
     try:
         said = rewrite(raw, args.model, args.effort, args.timeout)
-    except RuntimeError as err:
+    except CodexFailed as err:
         print(err, file=sys.stderr)
+        if err.output:
+            print(err.output, file=sys.stderr)
         return 1
     print(said)
     if args.time:
