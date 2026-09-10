@@ -601,7 +601,7 @@ def opening_notice(payload: dict, lang: str) -> str:
         return ""
     if lang == "zh" and not is_chinese(payload.get("delta", "")):
         return ""
-    return f"*{MARK} waiting for the whole message*"
+    return status("waiting for the whole message")
 
 
 def final_display(payload: dict, args: argparse.Namespace) -> str:
