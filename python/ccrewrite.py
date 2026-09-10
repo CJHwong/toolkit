@@ -31,6 +31,8 @@ USAGE:
     URL=https://raw.githubusercontent.com/CJHwong/toolkit/main/python/ccrewrite.py
 
     uv run "$URL" check                     # one real round trip, with timings
+    uv run "$URL" rewrite "你的文字"          # rewrite one string, print it, exit
+    pbpaste | uv run "$URL" rewrite --time   # or read stdin, so newlines survive
     uv run "$URL" install --lang zh         # rewrite Chinese, leave the rest alone
     uv run "$URL" install --lang all        # rewrite every message
     uv run "$URL" install --lang zh --scope project
@@ -704,6 +706,26 @@ def cmd_check(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_rewrite(args: argparse.Namespace) -> int:
+    """Rewrite text given on the command line or on stdin, and print the result."""
+    raw = " ".join(args.text) if args.text else sys.stdin.read()
+    raw = raw.strip()
+    if not raw:
+        print("nothing to rewrite", file=sys.stderr)
+        return 1
+
+    began = time.monotonic()
+    try:
+        said = rewrite(raw, args.model, args.effort)
+    except RuntimeError as err:
+        print(err, file=sys.stderr)
+        return 1
+    print(said)
+    if args.time:
+        print(f"[{time.monotonic() - began:.1f}s]", file=sys.stderr)
+    return 0
+
+
 # --- entry point -------------------------------------------------------------
 
 
@@ -736,11 +758,16 @@ def main() -> int:
     check = sub.add_parser("check", help="run one real rewrite and time it")
     check.set_defaults(run=cmd_check)
 
+    prose = sub.add_parser("rewrite", help="rewrite text from an argument or stdin")
+    prose.add_argument("text", nargs="*", help="the text to rewrite. Omit it to read stdin.")
+    prose.add_argument("--time", action="store_true", help="print the elapsed time on stderr")
+    prose.set_defaults(run=cmd_rewrite)
+
     listen = sub.add_parser("hook", help="read a MessageDisplay hook payload on stdin")
     listen.add_argument("--lang", choices=LANGS, default=DEFAULT_LANG)
     listen.set_defaults(run=run_hook)
 
-    for knobs in (install, check, listen):
+    for knobs in (install, check, prose, listen):
         knobs.add_argument("--model", default=DEFAULT_MODEL, help="any model codex exec accepts")
         knobs.add_argument("--effort", choices=EFFORTS, default=DEFAULT_EFFORT)
 
