@@ -64,7 +64,10 @@ WHAT IT COSTS:
     emits roughly as many characters as it reads, so output length sets the
     cost, not reasoning. CODEX_TIMEOUT of 100s therefore gives out near 9300
     characters. The hook keeps that default on purpose, because nobody waits
-    minutes to read a message. `rewrite --timeout` raises it for a document.
+    minutes to read a message. It skips anything over skip_over(), 7065
+    characters at the default budget, rather than spending the whole 100s to
+    fail. `rewrite --timeout` raises the budget for a document, where waiting
+    is the point.
 
 INSTALL DETAIL:
     `install` copies this file to ~/.claude/hooks/ccrewrite.py and points the
@@ -108,6 +111,20 @@ SKIP_UNDER = 240
 # A Han character carries far more than a Latin one, so 200 characters of
 # Chinese is a long paragraph, not a one-line acknowledgement.
 SKIP_UNDER_HAN = 72
+# Above this, the rewrite cannot finish inside CODEX_TIMEOUT, so attempting it
+# spends the whole budget and shows the message late and unedited. A rewrite
+# costs a fixed setup plus a per-character rate, because the model emits about
+# as many characters as it reads. Measured on gpt-5.6-luna: 1000 characters in
+# 24.0s, 3000 in 46.5s, 6000 in 69.8s. Keep a margin, so a slow request still
+# lands rather than dying at the ceiling.
+SETUP_SECONDS = 15.0
+SECONDS_PER_CHAR = 0.0092
+TIMEOUT_MARGIN = 0.8
+
+
+def skip_over(budget: float = CODEX_TIMEOUT) -> int:
+    """The longest message a rewrite can finish inside the budget."""
+    return int((budget * TIMEOUT_MARGIN - SETUP_SECONDS) / SECONDS_PER_CHAR)
 
 # Shown only on a message that was actually rewritten. A pass-through already
 # prints the original text, so pointing at ctrl+o there would be noise.
@@ -513,6 +530,9 @@ def final_display(payload: dict, args: argparse.Namespace) -> str:
     limit = SKIP_UNDER_HAN if is_chinese(raw) else SKIP_UNDER
     if len(raw.strip()) <= limit:
         return keep_original(raw, "left a short message alone")
+    ceiling = skip_over()
+    if len(raw.strip()) > ceiling:
+        return keep_original(raw, f"too long to rewrite, {len(raw.strip())} over {ceiling}")
 
     began = time.monotonic()
     try:
