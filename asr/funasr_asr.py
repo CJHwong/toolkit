@@ -14,7 +14,7 @@ FunASR CLI - Audio transcription using FunASR (Paraformer) on CPU/MPS.
 
 USAGE:
     # Run directly from GitHub (no clone needed):
-    URL=https://raw.githubusercontent.com/CJHwong/toolkit/main/python/funasr_asr.py
+    URL=https://raw.githubusercontent.com/CJHwong/toolkit/main/asr/funasr_asr.py
 
     # Basic transcription (Chinese + English code-switching)
     uv run $URL audio.mp3

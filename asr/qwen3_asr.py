@@ -12,7 +12,7 @@ Qwen3-ASR CLI - Audio transcription using mlx-audio on Apple Silicon.
 
 USAGE:
     # Run directly from GitHub (no clone needed):
-    URL=https://raw.githubusercontent.com/CJHwong/toolkit/main/python/qwen3_asr.py
+    URL=https://raw.githubusercontent.com/CJHwong/toolkit/main/asr/qwen3_asr.py
 
     # Basic transcription (auto-detect language)
     uv run $URL audio.mp3
