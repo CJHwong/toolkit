@@ -4,8 +4,8 @@ A flat collection of standalone CLI scripts. Each script is a single
 self-contained file, run directly with `uv run`. No shared package, no
 `requirements.txt`, no virtualenv to manage.
 
-Scripts live in `python/` (general tools and ASR) and `tts/` (voice cloning and
-speech synthesis).
+Scripts live in `python/` (general tools), `tts/` (voice cloning and speech
+synthesis) and `asr/` (speech recognition).
 
 ## PEP 723 scripts
 
