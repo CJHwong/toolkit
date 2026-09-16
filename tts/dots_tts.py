@@ -6,6 +6,7 @@
 #     "mlx-metal==0.32.0 ; sys_platform == 'darwin'",
 #     "mlx-lm==0.31.3",
 #     "click==8.3.1",
+#     "opencc-python-reimplemented==0.1.7",
 # ]
 # ///
 # NOTE: mlx-lm is pinned because dots-tts-mlx declares it bare ("mlx-lm"), and a
@@ -24,7 +25,7 @@ run (int4 ~2.4GB by default), so you do not need to fetch or convert anything.
 
 USAGE:
     # Run directly from GitHub (no clone needed):
-    URL=https://raw.githubusercontent.com/CJHwong/toolkit/main/python/dots_tts.py
+    URL=https://raw.githubusercontent.com/CJHwong/toolkit/main/tts/dots_tts.py
 
     # Clone a voice (reference audio + its exact transcript)
     uv run $URL "Hello, this is a voice cloning demo." \
@@ -58,6 +59,8 @@ OPTIONS:
     --gap-ms               Silence between chunks in --long mode (default: 80)
     --speed                Pitch-preserving tempo via ffmpeg atempo (default: 1.0)
     --no-trim-onset        Keep the raw vocoder onset (trim is on by default)
+    --no-clean             Keep shortcodes, emoji and Markdown markers as written
+    --no-convert           Keep Traditional Chinese as written
     -v, --verbose          Show progress details
 
 VARIANTS:
@@ -73,8 +76,18 @@ NOTES:
     - --speed needs ffmpeg installed.
     - This port does not support x-vector-only or no-reference sampling; a
       reference clip plus its transcript is always required.
+    - Traditional Chinese is mispronounced. Same reference, same text, one
+      variable: Simplified scored 0.9924 with 6 of 6 hard words, Traditional
+      scored 0.9208 with 4 of 6 and read 勞基法 as "logifa". The text is
+      converted with opencc tw2s first, which changes characters only so
+      Taiwan vocabulary survives. Pass --no-convert to send it untouched.
+    - Chat shortcodes, emoji and Markdown markers are stripped before
+      synthesis because none of them can be spoken. Punctuation that carries
+      meaning is kept: 45,000~55,000 reads as 四万五千到五万五千 and 35% as
+      百分之三十五. Pass --no-clean to keep the raw text.
     - Supports piped input: echo "text" | uv run dots_tts.py -r ref.wav -t "..."
 """
+import re
 import sys
 from pathlib import Path
 
@@ -82,6 +95,74 @@ import click
 
 HF_REPO = "shraey/dots-tts-mlx"
 VARIANTS = ("int4", "int8", "mf-int4", "mf-int8")
+
+CHINESE_LANGUAGES = {"", "auto", "chinese", "zh", "zh-cn", "zh-tw"}
+
+SHORTCODE_PATTERN = re.compile(r":[A-Za-z0-9_+\-]{1,32}:")
+EMOJI_PATTERN = re.compile(
+    "["
+    "\U0001F000-\U0001FAFF"  # pictographs, emoticons, transport, supplemental
+    "\U00002600-\U000027BF"  # miscellaneous symbols and dingbats
+    "\U00002B00-\U00002BFF"  # miscellaneous symbols and arrows
+    "\U0000FE00-\U0000FE0F"  # variation selectors
+    "\U0000200D"             # zero width joiner
+    "]"
+)
+MARKDOWN_PATTERN = re.compile(r"[*_`#>]+")
+
+
+def to_simplified(text: str) -> str:
+    """Convert Traditional Chinese to the Simplified form the tokenizer knows.
+
+    tw2s changes characters only, so Taiwan vocabulary survives as written.
+    Traditional input left as-is is mispronounced. Measured on the same
+    reference and the same text: Simplified scored 0.9924 with 6 of 6 hard
+    words, Traditional scored 0.9208 with 4 of 6 and read 勞基法 as "logifa".
+    """
+    import opencc
+
+    return opencc.OpenCC("tw2s").convert(text)
+
+
+def clean_for_speech(text: str) -> str:
+    """Drop markup that carries no speech, so the model cannot misread it.
+
+    Removes chat shortcodes (":pray:"), emoji, and Markdown markers. Keeps the
+    punctuation that carries prosody and meaning: 。，、：；！？「」（） plus
+    digits, thousands separators, "~" and "%". Those read correctly as measured
+    on a real run, so stripping them deletes meaning rather than noise.
+    """
+    text = SHORTCODE_PATTERN.sub(" ", text)
+    text = EMOJI_PATTERN.sub("", text)
+    text = MARKDOWN_PATTERN.sub(" ", text)
+    text = text.replace("​", "").replace("﻿", "")
+    text = "\n".join(line.strip() for line in text.splitlines())
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
+def prepare_text(text: str, language: str | None, no_clean: bool, no_convert: bool, verbose: bool) -> str:
+    """Clean markup, then convert script, before synthesis.
+
+    Conversion is gated on language because tw2s rewrites Japanese kanji too,
+    and on Han characters being present, without which it is a no-op.
+    """
+    if not no_clean:
+        cleaned = clean_for_speech(text)
+        if cleaned != text and verbose:
+            preview = cleaned[:60] + ("..." if len(cleaned) > 60 else "")
+            click.echo(f"Cleaned for speech: {preview}")
+        text = cleaned
+
+    if no_convert or (language or "").strip().lower() not in CHINESE_LANGUAGES:
+        return text
+    if not any("㐀" <= c <= "䶿" or "一" <= c <= "鿿" for c in text):
+        return text
+
+    converted = to_simplified(text)
+    if converted != text and verbose:
+        preview = converted[:60] + ("..." if len(converted) > 60 else "")
+        click.echo(f"Converted to Simplified: {preview}")
+    return converted
 
 
 def get_unique_filename(base_path: Path) -> Path:
@@ -196,11 +277,13 @@ def apply_speed(wav_path: Path, speed: float) -> None:
 @click.option("--gap-ms", type=int, default=80, help="Silence between chunks in --long mode")
 @click.option("--speed", type=float, default=1.0, help="Pitch-preserving tempo via ffmpeg atempo")
 @click.option("--no-trim-onset", is_flag=True, help="Keep the raw vocoder onset (trim is on by default)")
+@click.option("--no-clean", is_flag=True, help="Keep shortcodes, emoji and Markdown markers")
+@click.option("--no-convert", is_flag=True, help="Keep Traditional Chinese as written")
 @click.option("-v", "--verbose", is_flag=True, help="Enable verbose output")
 def cli(
     text, ref_audio, ref_text, model, variant, output, language, num_steps,
     guidance_scale, speaker_scale, seed, max_generate_length, long_mode, gap_ms,
-    speed, no_trim_onset, verbose,
+    speed, no_trim_onset, no_clean, no_convert, verbose,
 ):
     """Clone a voice from reference audio + its transcript (48kHz, pure MLX).
 
@@ -223,7 +306,9 @@ def cli(
 
     mx.set_memory_limit(int(45 * (1 << 30)))  # memory ceiling, set before heavy alloc
 
-    text = get_text_from_input(text)
+    text = prepare_text(
+        get_text_from_input(text), language, no_clean, no_convert, verbose
+    )
     output_path = resolve_output_path(output)
 
     ref_path = Path(ref_audio)

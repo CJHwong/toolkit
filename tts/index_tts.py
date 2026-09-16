@@ -24,7 +24,7 @@ yunfengwang/IndexTTS-2.5-mlx into the Hugging Face cache on first run.
 
 USAGE:
     # Run directly from GitHub (no clone needed):
-    URL=https://raw.githubusercontent.com/CJHwong/toolkit/main/python/index_tts.py
+    URL=https://raw.githubusercontent.com/CJHwong/toolkit/main/tts/index_tts.py
 
     # Clone a voice (reference audio only, no transcript needed)
     # Traditional Chinese is converted to Simplified first, see NOTES
@@ -82,10 +82,11 @@ NOTES:
     - Language is not auto-detected. Pass -l en for English text, or the
       Chinese frontend mangles it.
     - The tokenizer is Simplified-only, so Traditional Chinese input comes out
-      garbled. Under -l zh the text is converted with opencc tw2sp first, which
-      also maps Taiwan vocabulary to its mainland form (軟體 -> 软件). Pass
-      --no-convert to send the text through untouched. Only the characters
-      change; the cloned voice and the accent are unaffected.
+      garbled. Under -l zh the text is converted with opencc tw2s first, which
+      changes characters only, so Taiwan vocabulary survives as written
+      (軟體 stays 軟體). Pass --no-convert to send the text through untouched.
+      Only the characters change; the cloned voice and the accent are
+      unaffected. This was tw2sp until the three TTS engines were unified.
     - An abbreviation written with a slash is misread. "HB/L No." came back as
       "HVAC call number" and "HBALF L number" across four references. Write it
       without the slash ("HBL No.") and it reads correctly. --no-normalization
@@ -163,12 +164,14 @@ def get_text_from_input(text: str | None) -> str:
 def to_simplified(text: str) -> str:
     """Convert Traditional Chinese to the Simplified form the tokenizer knows.
 
-    tw2sp also maps Taiwan vocabulary to its mainland form, which is what the
-    model was trained on. Traditional characters left as-is come out garbled.
+    tw2s changes characters only, so Taiwan vocabulary survives as written.
+    Traditional characters left as-is come out garbled. This was tw2sp until
+    the three TTS engines were unified on tw2s; the earlier setting also
+    rewrote vocabulary (軟體 -> 软件), which changes what the voice says.
     """
     import opencc
 
-    return opencc.OpenCC("tw2sp").convert(text)
+    return opencc.OpenCC("tw2s").convert(text)
 
 
 @click.command()

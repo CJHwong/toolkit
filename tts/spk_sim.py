@@ -21,7 +21,7 @@ cosine similarity in [-1, 1]. Higher = closer to the reference voice.
 
 USAGE:
     # Run directly from GitHub (no clone needed):
-    URL=https://raw.githubusercontent.com/CJHwong/toolkit/main/python/spk_sim.py
+    URL=https://raw.githubusercontent.com/CJHwong/toolkit/main/tts/spk_sim.py
 
     # Score one or more clones against a reference
     uv run $URL ref.wav clone_a.wav clone_b.wav

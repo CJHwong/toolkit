@@ -1,8 +1,11 @@
 # toolkit
 
-A flat collection of standalone CLI scripts. Each script in `python/` is a
-single self-contained file, run directly with `uv run`. No shared package, no
+A flat collection of standalone CLI scripts. Each script is a single
+self-contained file, run directly with `uv run`. No shared package, no
 `requirements.txt`, no virtualenv to manage.
+
+Scripts live in `python/` (general tools and ASR) and `tts/` (voice cloning and
+speech synthesis).
 
 ## PEP 723 scripts
 
@@ -53,6 +56,11 @@ USAGE:
 
     uv run $URL ...
 ```
+
+The folder is part of that published address. GitHub raw cannot redirect, so
+moving a script to another folder 404s every saved URL of it. Move a script
+only when a stale URL costs less than the better layout, and update the `USAGE`
+block in the same change.
 
 This only works when every dependency resolves from PyPI. A script that needs a
 `[tool.uv.sources]` git dep can't be fetched and run from the URL alone (uv
@@ -110,4 +118,5 @@ is hardware bound and varies several fold across Apple Silicon generations, so
 a number without its machine is meaningless.
 
 What each wrapped model actually does, as opposed to what its docs claim, lives
-in `python/CLAUDE.md`. Read it before promising a capability.
+in `tts/CLAUDE.md` for the speech engines and `asr/CLAUDE.md` for the
+transcription engines. Read the relevant one before promising a capability.

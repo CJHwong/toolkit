@@ -7,6 +7,7 @@
 #     "numpy==2.4.4",
 #     "soundfile==0.13.1",
 #     "librosa==0.11.0",
+#     "opencc-python-reimplemented==0.1.7",
 # ]
 # ///
 """
@@ -16,7 +17,7 @@ Inspired by https://simonwillison.net/2026/Jan/22/qwen3-tts/
 
 USAGE:
     # Run directly from GitHub (no clone needed):
-    URL=https://raw.githubusercontent.com/CJHwong/toolkit/main/python/qwen3_tts.py
+    URL=https://raw.githubusercontent.com/CJHwong/toolkit/main/tts/qwen3_tts.py
 
     # Design a voice from description
     uv run $URL design 'I am a pirate, give me your gold!' -i 'gruff voice' -o pirate.wav
@@ -62,6 +63,9 @@ OPTIONS:
     -l, --language  Language: Auto, English, Chinese, Japanese, Korean, etc. (default: Auto)
     -v, --verbose   Show progress details
     --small         Use faster 0.6B model (clone/speak only)
+    --no-clean      Keep chat shortcodes, emoji and Markdown markers as written
+    --no-convert    Keep Traditional Chinese as written (clone/speak only)
+    --interval-silence  Silence between split segments in ms (default: 200)
 
 SPEAKERS:
     Chinese: Vivian, Serena, Uncle_Fu, Dylan, Eric
@@ -71,7 +75,25 @@ NOTES:
     - First run downloads models (~3GB for 1.7B, ~1GB for 0.6B)
     - Reference audio is automatically converted to mono 24kHz
     - Supports piped input: echo "text" | uv run qwen3_tts.py design
+    - Traditional Chinese is mispronounced. One reference clip, one model,
+      one variable: 颱風假 came out 圈封夾, 綜合 came out 沖派, 續聘 came out
+      助聘. Converted with opencc tw2s, all three read correctly. clone and
+      speak convert by default; pass --no-convert to send the text untouched.
+      tw2s changes characters only, so Taiwan vocabulary survives (軟體 stays
+      軟體, 批次 stays 批次). All three TTS engines use tw2s.
+    - Chat shortcodes, emoji and Markdown markers are stripped before
+      synthesis because none of them can be spoken. Punctuation that carries
+      meaning is kept: 45,000~55,000 reads as 四万五千到五万五千 and 35% as
+      百分之三十五. Pass --no-clean to keep the raw text.
+    - Reference audio must be a format libsndfile reads. An .m4a (AAC) fails
+      with "Format not recognised"; convert to WAV first.
+    - Long text is segmented internally. generate() splits on newlines and
+      yields one result per segment, and every segment is joined with
+      --interval-silence between them. A single call over 1,294 characters
+      used to truncate, losing the closing line entirely; paragraph breaks in
+      the input now become segment boundaries, so keep them.
 """
+import re
 import sys
 from pathlib import Path
 
@@ -128,6 +150,97 @@ def get_text_from_input(text: str | None) -> str:
     return text
 
 
+CHINESE_LANGUAGES = {"auto", "chinese", "zh", "zh-cn", "zh-tw"}
+
+
+def to_simplified(text: str) -> str:
+    """Convert Traditional Chinese to the Simplified form the tokenizer knows.
+
+    tw2s changes characters only, so Taiwan vocabulary survives as written
+    (軟體 stays 軟體, 批次 stays 批次). Traditional input left as-is is
+    mispronounced. Measured against one reference clip, same model, one
+    variable: 颱風假 came out 圈封夾, 綜合 came out 沖派, 續聘 came out 助聘.
+    All three read correctly once the text was converted.
+    """
+    import opencc
+
+    return opencc.OpenCC("tw2s").convert(text)
+
+
+SHORTCODE_PATTERN = re.compile(r":[A-Za-z0-9_+\-]{1,32}:")
+EMOJI_PATTERN = re.compile(
+    "["
+    "\U0001F000-\U0001FAFF"  # pictographs, emoticons, transport, supplemental
+    "\U00002600-\U000027BF"  # miscellaneous symbols and dingbats
+    "\U00002B00-\U00002BFF"  # miscellaneous symbols and arrows
+    "\U0000FE00-\U0000FE0F"  # variation selectors
+    "\U0000200D"             # zero width joiner
+    "]"
+)
+MARKDOWN_PATTERN = re.compile(r"[*_`#>]+")
+
+
+def clean_for_speech(text: str) -> str:
+    """Drop markup that carries no speech, so the model cannot misread it.
+
+    Removes chat shortcodes (":pray:"), emoji, and Markdown markers.
+    Keeps the punctuation that carries prosody and meaning: 。，、：；！？「」（）
+    plus digits, thousands separators, "~" and "%". Those read correctly as
+    measured on a real run (45,000~55,000 spoke as 四万五千到五万五千, 35% as
+    百分之三十五), so stripping them deletes meaning rather than noise.
+    """
+    text = SHORTCODE_PATTERN.sub(" ", text)
+    text = EMOJI_PATTERN.sub("", text)
+    text = MARKDOWN_PATTERN.sub(" ", text)
+    text = text.replace("​", "").replace("﻿", "")
+    text = "\n".join(line.strip() for line in text.splitlines())
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
+def prepare_text(
+    text: str, language: str, no_clean: bool, no_convert: bool, verbose: bool
+) -> str:
+    """Clean markup, then convert script, before synthesis.
+
+    Conversion is gated on language because tw2s rewrites Japanese kanji too,
+    and on Han characters being present, without which it is a no-op.
+    """
+    if not no_clean:
+        cleaned = clean_for_speech(text)
+        if cleaned != text and verbose:
+            preview = cleaned[:60] + ("..." if len(cleaned) > 60 else "")
+            click.echo(f"Cleaned for speech: {preview}")
+        text = cleaned
+
+    if no_convert or language.strip().lower() not in CHINESE_LANGUAGES:
+        return text
+    if not any("㐀" <= c <= "䶿" or "一" <= c <= "鿿" for c in text):
+        return text
+
+    converted = to_simplified(text)
+    if converted != text and verbose:
+        preview = converted[:60] + ("..." if len(converted) > 60 else "")
+        click.echo(f"Converted to Simplified: {preview}")
+    return converted
+
+
+def concatenate_segments(results: list, sample_rate: int, gap_ms: int):
+    """Join the audio of every generated segment, with silence between them.
+
+    `generate()` splits the text on `split_pattern` and yields one result per
+    segment. Keeping only the first silently drops every later paragraph.
+    """
+    clips = [np.asarray(result.audio) for result in results]
+    gap = np.zeros(int(sample_rate * gap_ms / 1000), dtype=clips[0].dtype)
+
+    parts = []
+    for index, clip in enumerate(clips):
+        if index:
+            parts.append(gap)
+        parts.append(clip)
+    return np.concatenate(parts)
+
+
 @click.group()
 @click.version_option(version="0.1.0")
 def cli():
@@ -145,9 +258,15 @@ def cli():
     default="",
     help="Voice instruction (e.g., 'warm female voice', 'deep male voice')",
 )
+@click.option("--interval-silence", type=int, default=200, help="Silence between split segments (ms)")
 @click.option("-v", "--verbose", is_flag=True, help="Enable verbose output")
 def design_command(
-    text: str | None, output: str, language: str, instruct: str, verbose: bool
+    text: str | None,
+    output: str,
+    language: str,
+    instruct: str,
+    interval_silence: int,
+    verbose: bool,
 ):
     """Generate speech using voice design (natural language voice description).
 
@@ -183,7 +302,10 @@ def design_command(
         )
     )
 
-    audio = results[0].audio
+    if verbose and len(results) > 1:
+        click.echo(f"Joined {len(results)} segments with {interval_silence}ms silence")
+
+    audio = concatenate_segments(results, model.sample_rate, interval_silence)
     save_audio(audio, model.sample_rate, output_path, verbose)
 
     if not verbose:
@@ -207,6 +329,9 @@ def design_command(
     help="Transcript of the reference audio",
 )
 @click.option("--small", is_flag=True, help="Use faster 0.6B model instead of 1.7B")
+@click.option("--no-clean", is_flag=True, help="Keep shortcodes, emoji and Markdown markers")
+@click.option("--no-convert", is_flag=True, help="Keep Traditional Chinese as written")
+@click.option("--interval-silence", type=int, default=200, help="Silence between split segments (ms)")
 @click.option("-v", "--verbose", is_flag=True, help="Enable verbose output")
 def clone_command(
     text: str | None,
@@ -215,6 +340,9 @@ def clone_command(
     ref_audio: str,
     ref_text: str,
     small: bool,
+    no_clean: bool,
+    no_convert: bool,
+    interval_silence: int,
     verbose: bool,
 ):
     """Clone a voice from reference audio and generate new speech.
@@ -229,7 +357,9 @@ def clone_command(
     import mlx.core as mx
     from mlx_audio.tts.utils import load_model
 
-    text = get_text_from_input(text)
+    text = prepare_text(
+        get_text_from_input(text), language, no_clean, no_convert, verbose
+    )
     output_path = resolve_output_path(output)
 
     # Validate reference audio
@@ -267,7 +397,8 @@ def clone_command(
 
     ref_audio_mx = mx.array(ref_audio_data.astype(np.float32))
 
-    # Use generate() which handles ICL voice cloning
+    # Use generate() which handles ICL voice cloning. It splits the text on
+    # newlines and yields one result per segment, so every segment must be kept.
     results = list(
         model.generate(
             text=text,
@@ -278,7 +409,10 @@ def clone_command(
         )
     )
 
-    audio = results[0].audio
+    if verbose and len(results) > 1:
+        click.echo(f"Joined {len(results)} segments with {interval_silence}ms silence")
+
+    audio = concatenate_segments(results, model.sample_rate, interval_silence)
     save_audio(audio, model.sample_rate, output_path, verbose)
 
     if not verbose:
@@ -302,9 +436,21 @@ def clone_command(
     help="Style instruction (e.g., 'speak angrily', 'very happy', 'slow and soft')",
 )
 @click.option("--small", is_flag=True, help="Use faster 0.6B model instead of 1.7B")
+@click.option("--no-clean", is_flag=True, help="Keep shortcodes, emoji and Markdown markers")
+@click.option("--no-convert", is_flag=True, help="Keep Traditional Chinese as written")
+@click.option("--interval-silence", type=int, default=200, help="Silence between split segments (ms)")
 @click.option("-v", "--verbose", is_flag=True, help="Enable verbose output")
 def speak_command(
-    text: str | None, output: str, language: str, speaker: str, instruct: str, small: bool, verbose: bool
+    text: str | None,
+    output: str,
+    language: str,
+    speaker: str,
+    instruct: str,
+    small: bool,
+    no_clean: bool,
+    no_convert: bool,
+    interval_silence: int,
+    verbose: bool,
 ):
     """Generate speech using a preset custom voice with optional style control.
 
@@ -324,7 +470,9 @@ def speak_command(
     """
     from mlx_audio.tts.utils import load_model
 
-    text = get_text_from_input(text)
+    text = prepare_text(
+        get_text_from_input(text), language, no_clean, no_convert, verbose
+    )
     output_path = resolve_output_path(output)
 
     model_name = "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice" if small else "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
@@ -349,7 +497,10 @@ def speak_command(
         )
     )
 
-    audio = results[0].audio
+    if verbose and len(results) > 1:
+        click.echo(f"Joined {len(results)} segments with {interval_silence}ms silence")
+
+    audio = concatenate_segments(results, model.sample_rate, interval_silence)
     save_audio(audio, model.sample_rate, output_path, verbose)
 
     if not verbose:
