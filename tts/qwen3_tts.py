@@ -64,7 +64,7 @@ OPTIONS:
     -v, --verbose   Show progress details
     --small         Use faster 0.6B model (clone/speak only)
     --no-clean      Keep chat shortcodes, emoji and Markdown markers as written
-    --no-convert    Keep Traditional Chinese as written (clone/speak only)
+    --no-convert    Keep Traditional Chinese as written
     --interval-silence  Silence between split segments in ms (default: 200)
 
 SPEAKERS:
@@ -77,7 +77,7 @@ NOTES:
     - Supports piped input: echo "text" | uv run qwen3_tts.py design
     - Traditional Chinese is mispronounced. One reference clip, one model,
       one variable: 颱風假 came out 圈封夾, 綜合 came out 沖派, 續聘 came out
-      助聘. Converted with opencc tw2s, all three read correctly. clone and
+      助聘. Converted with opencc tw2s, all three read correctly. design, clone and
       speak convert by default; pass --no-convert to send the text untouched.
       tw2s changes characters only, so Taiwan vocabulary survives (軟體 stays
       軟體, 批次 stays 批次). All three TTS engines use tw2s.
@@ -258,6 +258,8 @@ def cli():
     default="",
     help="Voice instruction (e.g., 'warm female voice', 'deep male voice')",
 )
+@click.option("--no-clean", is_flag=True, help="Keep shortcodes, emoji and Markdown markers")
+@click.option("--no-convert", is_flag=True, help="Keep Traditional Chinese as written")
 @click.option("--interval-silence", type=int, default=200, help="Silence between split segments (ms)")
 @click.option("-v", "--verbose", is_flag=True, help="Enable verbose output")
 def design_command(
@@ -265,6 +267,8 @@ def design_command(
     output: str,
     language: str,
     instruct: str,
+    no_clean: bool,
+    no_convert: bool,
     interval_silence: int,
     verbose: bool,
 ):
@@ -280,7 +284,9 @@ def design_command(
     """
     from mlx_audio.tts.utils import load_model
 
-    text = get_text_from_input(text)
+    text = prepare_text(
+        get_text_from_input(text), language, no_clean, no_convert, verbose
+    )
     output_path = resolve_output_path(output)
 
     if verbose:

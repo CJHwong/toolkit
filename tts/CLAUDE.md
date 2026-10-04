@@ -14,7 +14,7 @@ engine actually does.
 |---|---|---|
 | Chinese clone from a reference clip | **`index_tts.py`** | Takes Traditional text directly, segments long text, controls duration, and seeds the run |
 | Fastest iteration | **`auk_tts.py`** on M1 Pro, `qwen3_tts.py --small` on M5 Pro | M1 Pro, same machine and text: `auk_tts.py` end-to-end RTF 1.22 against 2.00 for `--small`. AuK has no M5 Pro run yet |
-| Reproducible output | `index_tts.py`, `dots_tts.py`, `auk_tts.py` | All take `--seed`. qwen3 is unseeded by design |
+| Reproducible output | `index_tts.py`, `dots_tts.py`, `auk_tts.py` | All three take `--seed`. `qwen3_tts.py` has no flag, so its output varies per run |
 | Exact target length | `index_tts.py` | `--duration-factor` is linear to 0.002, so one shot lands it |
 | A voice from a written description | `qwen3_tts.py design`, `auk_tts.py design` | Both build a voice from a description, so they clone nobody |
 | Emotion with no reference | `qwen3_tts.py speak` | The only engine that honors `instruct`, over 9 preset speakers |
@@ -65,7 +65,7 @@ over ssh. Lower RTF is faster; 1.0 is real time.
 | `dots_tts.py` | Traditional | 48k | 27.84s | 256s | 9.2 | 0.9208 | 0.7401 | 4/6 |
 
 **Read the speed and the intelligibility columns. Do not read the `spk_sim`
-column as a ranking.** Both qwen3 sizes are unseeded, and one engine measured
+column as a ranking.** Both qwen3 runs were unseeded, and one engine measured
 0.8238 on one text and 0.7238 on another, a spread of 0.1 that is the same size
 as the entire range across engines above. Ranking on those numbers would be
 reading sampling noise. N replicates per condition is the only thing that
@@ -215,7 +215,11 @@ converted by the script. Wall is the whole process, warm, weights cached.
    Pro 0.56. The port advertises 0.47, which is roughly honest on current
    hardware. Cold Metal kernel compilation costs more than the hardware gap:
    30.3s vs 13.8s on the same M5 Pro. Run batches on the faster box over ssh.
-7. **The reference is meant to be 15s or shorter.** `gn.wav` at 16.5s ran and
+7. **It misreads some words in some sentences, even after `tw2s`.** 續聘 read
+   wrong in 6 of 6 runs of "明年的續聘名單", and right in "決定續聘所有". A pinyin
+   mark fixed it in 1 of 3 seeds. So the 6/6 hard-word scores above hold for
+   those passages only, not for the word.
+8. **The reference is meant to be 15s or shorter.** `gn.wav` at 16.5s ran and
    returned 0, so this reads as a guideline rather than a hard limit.
 
 **Which checkpoint:** unknowable. The 2.5 technical report describes a GRPO
@@ -238,7 +242,9 @@ over 9 preset speakers, 1.7B only, no ref audio. VoiceDesign
 (`generate_voice_design(text, instruct)`) builds a voice from a description,
 so it clones nobody.
 
-**qwen3-tts is unseeded.** Any single A/B is confounded by sampling variance.
+**`qwen3_tts.py` has no `--seed` flag, so each run is unseeded.** The model
+itself is seedable: speech-gen calls `mx.random.seed(n)` before a run, and the
+same seed gives byte-identical audio. Any single A/B is confounded by sampling variance.
 To test an effect, run N replicates per condition and compare distributions.
 One-versus-one will show you a signal that is not there.
 
@@ -269,7 +275,7 @@ the end and a phrase dropped from the opening, and ECAPA similarity fell to
 
 **Chunking can loop.** One 67-character chunk produced 20.1s of audio instead
 of the expected 12.8s, and both ASRs read that whole paragraph as
-`與與與與與劉劉劉`. The model is unseeded, so a retry of identical text fixed
+`與與與與與劉劉劉`. The script is unseeded, so a retry of identical text fixed
 it. Diagnose by characters per second before blaming the text: healthy output
 runs 4.3 to 5.9, the looping chunk ran 3.33.
 
