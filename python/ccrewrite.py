@@ -210,7 +210,9 @@ Mandarin (台灣正體), applying Yu Kwang-chung's rules against 英式中文:
 
 Keep every sentence under 25 characters, one idea each. Write flowing
 paragraphs. Never put one sentence per line, and never end a line with two
-spaces. Keep the intent and every detail. Keep code, paths, commands, error
+spaces. Keep the line and paragraph breaks of the original. Add a new one only
+where the topic changes, not after each short sentence. Keep the intent and
+every detail. Keep code, paths, commands, error
 strings, and English technical terms verbatim.
 
 This is a text task, not a coding task. Do not run commands, read files, or call
